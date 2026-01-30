@@ -3,6 +3,7 @@ export interface Message {
   role: "user" | "assistant";
   content: string;
   timestamp: Date;
+  attachments?: Array<{ url: string; mime: string; filename?: string }>;
 }
 
 export interface GeneratedCode {

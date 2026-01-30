@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { ChevronDown, ChevronRight, FileCode, FileJson, Folder, FolderOpen } from "lucide-react";
+import { ChevronDown, ChevronRight, EyeOff, FileCode, FileJson, Folder, FolderOpen } from "lucide-react";
 import type { OpenCodeFileNode } from "@/lib/opencode-client";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Button } from "@/components/ui/button";
 
 interface FileTreeProps {
   files: OpenCodeFileNode[];
@@ -121,14 +122,29 @@ const FileTreeNode = ({
 };
 
 const FileTree = ({ files, selectedFile, onSelectFile, onExpandDir, getChildren }: FileTreeProps) => {
+  const [showIgnored, setShowIgnored] = useState(false);
+
+  const visible = showIgnored ? files : files.filter((n) => !n.ignored);
+
   return (
     <div className="h-full flex flex-col bg-card/30">
       <div className="h-10 border-b border-border flex items-center px-3">
-        <span className="text-xs font-medium text-muted-foreground">Files</span>
+        <div className="flex items-center justify-between w-full">
+          <span className="text-xs font-medium text-muted-foreground">Files</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-2 text-xs"
+            onClick={() => setShowIgnored((v) => !v)}
+          >
+            <EyeOff className="h-3.5 w-3.5" />
+            {showIgnored ? "Hide ignored" : "Show ignored"}
+          </Button>
+        </div>
       </div>
       <ScrollArea className="flex-1">
         <div className="py-2">
-          {files.map((node) => (
+          {visible.map((node) => (
             <FileTreeNode
               key={node.path}
               node={node}

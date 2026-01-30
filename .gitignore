@@ -40,5 +40,12 @@ coverage/
 # Archives
 *.zip
 
+# Local captures / prompts
+*.har
+prompt.md
+
 # Backed up git dirs
 **/.git.bak-*
+
+# Local workspaces
+workspaces/

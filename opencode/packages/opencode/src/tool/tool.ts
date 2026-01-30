@@ -55,6 +55,20 @@ export namespace Tool {
         const toolInfo = init instanceof Function ? await init(initCtx) : init
         const execute = toolInfo.execute
         toolInfo.execute = async (args, ctx) => {
+          const abort = () => {
+            return new Promise<never>((_, reject) => {
+              if (ctx.abort.aborted) {
+                reject(new DOMException("Aborted", "AbortError"))
+                return
+              }
+              const onAbort = () => {
+                ctx.abort.removeEventListener("abort", onAbort)
+                reject(new DOMException("Aborted", "AbortError"))
+              }
+              ctx.abort.addEventListener("abort", onAbort, { once: true })
+            })
+          }
+
           try {
             toolInfo.parameters.parse(args)
           } catch (error) {
@@ -66,7 +80,8 @@ export namespace Tool {
               { cause: error },
             )
           }
-          const result = await execute(args, ctx)
+
+          const result = await Promise.race([execute(args, ctx), abort()])
           // skip truncation for tools that handle it themselves
           if (result.metadata.truncated !== undefined) {
             return result
