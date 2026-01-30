@@ -1,53 +1,73 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, FileCode, FileJson, Folder, FolderOpen } from "lucide-react";
-import { FileNode } from "@/lib/code-parser";
+import type { OpenCodeFileNode } from "@/lib/opencode-client";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface FileTreeProps {
-  files: FileNode[];
+  files: OpenCodeFileNode[];
   selectedFile: string | null;
-  onSelectFile: (path: string, content: string, language: string) => void;
+  onSelectFile: (path: string) => void;
+  onExpandDir: (path: string) => void;
+  getChildren: (path: string) => OpenCodeFileNode[] | undefined;
 }
 
 const fileIcons: Record<string, typeof FileCode> = {
   html: FileCode,
   css: FileCode,
-  javascript: FileCode,
+  js: FileCode,
+  jsx: FileCode,
+  ts: FileCode,
+  tsx: FileCode,
   json: FileJson,
+  md: FileCode,
 };
+
+function extname(name: string) {
+  const idx = name.lastIndexOf(".");
+  if (idx === -1) return "";
+  return name.slice(idx + 1).toLowerCase();
+}
 
 const FileTreeNode = ({
   node,
-  path,
   selectedFile,
   onSelectFile,
+  onExpandDir,
+  getChildren,
   level = 0,
 }: {
-  node: FileNode;
-  path: string;
+  node: OpenCodeFileNode;
   selectedFile: string | null;
-  onSelectFile: (path: string, content: string, language: string) => void;
+  onSelectFile: (path: string) => void;
+  onExpandDir: (path: string) => void;
+  getChildren: (path: string) => OpenCodeFileNode[] | undefined;
   level?: number;
 }) => {
-  const [isOpen, setIsOpen] = useState(true);
-  const currentPath = path ? `${path}/${node.name}` : node.name;
-  const isFolder = node.type === "folder";
+  const [isOpen, setIsOpen] = useState(false);
+  const currentPath = node.path;
+  const isFolder = node.type === "directory";
   const isSelected = selectedFile === currentPath;
+  const children = isFolder ? getChildren(currentPath) : undefined;
 
   const handleClick = () => {
     if (isFolder) {
-      setIsOpen(!isOpen);
-    } else if (node.content !== undefined && node.language) {
-      onSelectFile(currentPath, node.content, node.language);
+      const next = !isOpen;
+      setIsOpen(next);
+      if (next && children === undefined) {
+        onExpandDir(currentPath);
+      }
+      return;
     }
+
+    onSelectFile(currentPath);
   };
 
   const Icon = isFolder
     ? isOpen
       ? FolderOpen
       : Folder
-    : fileIcons[node.language || ""] || FileCode;
+    : fileIcons[extname(node.name)] || FileCode;
 
   return (
     <div>
@@ -55,7 +75,8 @@ const FileTreeNode = ({
         className={cn(
           "flex items-center gap-1.5 px-2 py-1 cursor-pointer rounded-sm text-xs",
           "hover:bg-muted/50 transition-colors",
-          isSelected && "bg-primary/20 text-primary"
+          isSelected && "bg-primary/20 text-primary",
+          node.ignored && "opacity-50"
         )}
         style={{ paddingLeft: `${level * 12 + 8}px` }}
         onClick={handleClick}
@@ -73,22 +94,23 @@ const FileTreeNode = ({
           className={cn(
             "h-4 w-4 shrink-0",
             isFolder ? "text-yellow-500" : "text-muted-foreground",
-            node.language === "html" && "text-orange-400",
-            node.language === "css" && "text-blue-400",
-            node.language === "javascript" && "text-yellow-400"
+            extname(node.name) === "html" && "text-orange-400",
+            extname(node.name) === "css" && "text-blue-400",
+            extname(node.name) === "js" && "text-yellow-400"
           )}
         />
         <span className="truncate">{node.name}</span>
       </div>
-      {isFolder && isOpen && node.children && (
+      {isFolder && isOpen && children && (
         <div>
-          {node.children.map((child) => (
+          {children.map((child) => (
             <FileTreeNode
-              key={child.name}
+              key={child.path}
               node={child}
-              path={currentPath}
               selectedFile={selectedFile}
               onSelectFile={onSelectFile}
+              onExpandDir={onExpandDir}
+              getChildren={getChildren}
               level={level + 1}
             />
           ))}
@@ -98,7 +120,7 @@ const FileTreeNode = ({
   );
 };
 
-const FileTree = ({ files, selectedFile, onSelectFile }: FileTreeProps) => {
+const FileTree = ({ files, selectedFile, onSelectFile, onExpandDir, getChildren }: FileTreeProps) => {
   return (
     <div className="h-full flex flex-col bg-card/30">
       <div className="h-10 border-b border-border flex items-center px-3">
@@ -108,11 +130,12 @@ const FileTree = ({ files, selectedFile, onSelectFile }: FileTreeProps) => {
         <div className="py-2">
           {files.map((node) => (
             <FileTreeNode
-              key={node.name}
+              key={node.path}
               node={node}
-              path=""
               selectedFile={selectedFile}
               onSelectFile={onSelectFile}
+              onExpandDir={onExpandDir}
+              getChildren={getChildren}
             />
           ))}
         </div>

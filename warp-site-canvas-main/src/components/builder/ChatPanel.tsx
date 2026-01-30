@@ -76,8 +76,12 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent }: 
               {suggestions.map((suggestion, i) => (
                 <button
                   key={i}
-                  onClick={() => onSendMessage(suggestion)}
-                  className="w-full text-left px-3 py-2 rounded-lg text-sm text-muted-foreground bg-muted/50 hover:bg-muted hover:text-foreground transition-colors"
+                  onClick={() => {
+                    if (isGenerating) return;
+                    onSendMessage(suggestion);
+                  }}
+                  disabled={isGenerating}
+                  className="w-full text-left px-3 py-2 rounded-lg text-sm text-muted-foreground bg-muted/50 hover:bg-muted hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {suggestion}
                 </button>

@@ -5,26 +5,90 @@ import BuilderHeader from "@/components/builder/BuilderHeader";
 import ConsolePanel from "@/components/builder/ConsolePanel";
 import FileTree from "@/components/builder/FileTree";
 import CodeEditor from "@/components/builder/CodeEditor";
-import { useState, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { streamChat, extractHtmlFromResponse } from "@/lib/ai-stream";
-import { Message, GeneratedCode, DEFAULT_PROVIDER, DEFAULT_MODEL } from "@/lib/ai-config";
-import { parseGeneratedCode, generateFileTree, ParsedFiles } from "@/lib/code-parser";
-import { exportAsZip } from "@/lib/export-utils";
+import { Message, DEFAULT_PROVIDER, DEFAULT_MODEL } from "@/lib/ai-config";
 import { useConsoleLogs } from "@/hooks/use-console-logs";
+import { OpenCode, type OpenCodeFileNode } from "@/lib/opencode-client";
+import { streamOpenCodeTextMessage } from "@/lib/opencode-stream";
+
+const guessLanguage = (path: string) => {
+  const idx = path.lastIndexOf(".");
+  const ext = idx === -1 ? "" : path.slice(idx + 1).toLowerCase();
+  if (ext === "html") return "html";
+  if (ext === "css") return "css";
+  if (ext === "js" || ext === "jsx") return "javascript";
+  if (ext === "ts" || ext === "tsx") return "typescript";
+  if (ext === "json") return "json";
+  if (ext === "md") return "markdown";
+  return "text";
+};
 
 const Builder = () => {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [generatedCode, setGeneratedCode] = useState<GeneratedCode>({ html: "", css: "", js: "" });
-  const [parsedFiles, setParsedFiles] = useState<ParsedFiles>({ html: "", css: "", js: "" });
+  const [sessionID, setSessionID] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
   const [provider, setProvider] = useState(DEFAULT_PROVIDER);
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [selectedFile, setSelectedFile] = useState<{ path: string; content: string; language: string } | null>(null);
+  const [rootFiles, setRootFiles] = useState<OpenCodeFileNode[]>([]);
+  const [childrenByPath, setChildrenByPath] = useState<Record<string, OpenCodeFileNode[]>>({});
   const consoleLogs = useConsoleLogs();
+  const abortRef = useRef<AbortController | null>(null);
 
-  const fileTree = generateFileTree(parsedFiles);
+  const refreshRootFiles = useCallback(async () => {
+    const nodes = await OpenCode.listFiles(".");
+    setRootFiles(nodes);
+  }, []);
+
+  const expandDir = useCallback(
+    async (path: string) => {
+      if (childrenByPath[path]) return;
+      try {
+        const nodes = await OpenCode.listFiles(path);
+        setChildrenByPath((prev) => ({ ...prev, [path]: nodes }));
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to load directory");
+      }
+    },
+    [childrenByPath],
+  );
+
+  const getChildren = useCallback((path: string) => childrenByPath[path], [childrenByPath]);
+
+  const ensureSession = useCallback(async () => {
+    if (sessionID) return sessionID;
+    const session = await OpenCode.createSession();
+    setSessionID(session.id);
+    consoleLogs.info("OpenCode session created", `Session: ${session.id}`);
+    return session.id;
+  }, [sessionID, consoleLogs]);
+
+  const stop = useCallback(async () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+
+    if (sessionID) {
+      await OpenCode.abortSession(sessionID).catch(() => undefined);
+    }
+    setIsGenerating(false);
+    setStreamingContent("");
+  }, [sessionID]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        await Promise.all([OpenCode.health(), refreshRootFiles(), ensureSession()]);
+      } catch (err) {
+        consoleLogs.error(
+          "OpenCode not reachable",
+          err instanceof Error ? err.message : "Check VITE_OPENCODE_URL and server status",
+        );
+        toast.error("OpenCode server not reachable (check VITE_OPENCODE_URL)");
+      }
+    })();
+  }, [consoleLogs, ensureSession, refreshRootFiles]);
 
   const handleSendMessage = async (content: string) => {
     const userMessage: Message = {
@@ -37,7 +101,7 @@ const Builder = () => {
     setMessages(prev => [...prev, userMessage]);
     setIsGenerating(true);
     setStreamingContent("");
-    consoleLogs.info(`Starting generation with ${model}`, `Provider: ${provider}\nPrompt: ${content}`);
+    consoleLogs.info("Sending message to OpenCode", `Prompt: ${content}`);
 
     const assistantMessageId = crypto.randomUUID();
     setMessages(prev => [...prev, {
@@ -49,91 +113,99 @@ const Builder = () => {
 
     let fullResponse = "";
 
-    await streamChat({
-      messages: [...messages, userMessage].map(m => ({ role: m.role, content: m.content })),
-      provider,
-      model,
-      onDelta: (text) => {
-        fullResponse += text;
-        setStreamingContent(fullResponse);
-        setMessages(prev => prev.map(m => 
-          m.id === assistantMessageId 
-            ? { ...m, content: fullResponse }
-            : m
-        ));
-      },
-      onDone: (response) => {
-        const code = extractHtmlFromResponse(response);
-        setGeneratedCode(code);
-        const parsed = parseGeneratedCode(code);
-        setParsedFiles(parsed);
-        setIsGenerating(false);
-        setStreamingContent("");
-        consoleLogs.success("Generation complete", `HTML: ${code.html.length} chars`);
-      },
-      onError: (error) => {
-        toast.error(error);
-        consoleLogs.error("Generation failed", error);
-        setIsGenerating(false);
-        setStreamingContent("");
-        setMessages(prev => prev.filter(m => m.id !== assistantMessageId));
-      },
-    });
+    try {
+      const id = await ensureSession();
+      const abort = new AbortController();
+      abortRef.current = abort;
+
+      await streamOpenCodeTextMessage({
+        sessionID: id,
+        text: content,
+        signal: abort.signal,
+        onDelta: (text) => {
+          fullResponse += text;
+          setStreamingContent(fullResponse);
+          setMessages((prev) =>
+            prev.map((m) => (m.id === assistantMessageId ? { ...m, content: fullResponse } : m)),
+          );
+        },
+        onDone: async (responseText) => {
+          setIsGenerating(false);
+          setStreamingContent("");
+          abortRef.current = null;
+
+          consoleLogs.success("OpenCode response complete", `${responseText.length} chars`);
+          await refreshRootFiles().catch(() => undefined);
+          await OpenCode.fileStatus()
+            .then((status) => {
+              if (status.length > 0) {
+                consoleLogs.info("Git status", status.slice(0, 20).map((s) => `${s.status}: ${s.path}`).join("\n"));
+              }
+            })
+            .catch(() => undefined);
+        },
+        onError: (error) => {
+          toast.error(error);
+          consoleLogs.error("OpenCode message failed", error);
+          setIsGenerating(false);
+          setStreamingContent("");
+          abortRef.current = null;
+          setMessages((prev) => prev.filter((m) => m.id !== assistantMessageId));
+        },
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to send message");
+      consoleLogs.error("OpenCode message failed", err instanceof Error ? err.message : "Unknown error");
+      setIsGenerating(false);
+      setStreamingContent("");
+      abortRef.current = null;
+      setMessages((prev) => prev.filter((m) => m.id !== assistantMessageId));
+    }
   };
 
-  const handleFileSelect = useCallback((path: string, content: string, language: string) => {
-    setSelectedFile({ path, content, language });
-    consoleLogs.debug(`Opened file: ${path}`);
-  }, [consoleLogs]);
-
-  const handleFileSave = useCallback((content: string) => {
-    if (!selectedFile) return;
-    
-    // Update the parsed files based on which file was edited
-    setParsedFiles(prev => {
-      const updated = { ...prev };
-      if (selectedFile.path.includes("index.html")) {
-        updated.html = content;
-      } else if (selectedFile.path.includes(".css")) {
-        updated.css = content;
-      } else if (selectedFile.path.includes(".js")) {
-        updated.js = content;
+  const handleFileSelect = useCallback(
+    async (path: string) => {
+      try {
+        const file = await OpenCode.readFile(path);
+        const language = guessLanguage(path);
+        setSelectedFile({ path, content: file.content, language });
+        consoleLogs.debug(`Opened file: ${path}`);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to read file");
       }
-      return updated;
-    });
-    
-    // Update generated code to trigger preview refresh
-    setGeneratedCode(prev => {
-      if (selectedFile.path.includes("index.html")) {
-        return { ...prev, html: content };
-      }
-      return prev;
-    });
-    
-    setSelectedFile(prev => prev ? { ...prev, content } : null);
-    consoleLogs.success(`Saved: ${selectedFile.path}`);
-    toast.success("File saved");
-  }, [selectedFile, consoleLogs]);
+    },
+    [consoleLogs],
+  );
 
   const handleCloseEditor = useCallback(() => {
     setSelectedFile(null);
   }, []);
 
-  const handleExport = useCallback(async () => {
-    if (!parsedFiles.html) {
-      toast.error("No website to export");
-      return;
-    }
-    consoleLogs.info("Exporting website as ZIP...");
+  const handleResetSession = useCallback(async () => {
+    await stop();
+    setMessages([]);
+    setSelectedFile(null);
+    setChildrenByPath({});
     try {
-      await exportAsZip(parsedFiles, "surreal-site");
-      consoleLogs.success("Export complete");
-      toast.success("Website exported successfully");
-    } catch (error) {
-      consoleLogs.error("Export failed", error instanceof Error ? error.message : "Unknown error");
-      toast.error("Failed to export website");
+      const session = await OpenCode.createSession();
+      setSessionID(session.id);
+      consoleLogs.info("Session reset", `Session: ${session.id}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to reset session");
     }
-  }, [parsedFiles, consoleLogs]);
+  }, [consoleLogs, stop]);
+
+  const handleApplyNextPatch = useCallback(async () => {
+    await handleSendMessage(
+      "Apply the next patch based on the current repo state and any previous errors. Keep changes minimal and run the relevant checks.",
+    );
+  }, [handleSendMessage]);
+
+  const handleRunLoop = useCallback(async () => {
+    await handleSendMessage(
+      "Run one iteration of the Ralph Wiggum loop: plan, make the minimal patch, run checks, observe failures, and repair once.",
+    );
+  }, [handleSendMessage]);
 
   return (
     <div className="h-screen flex flex-col bg-background">
@@ -142,16 +214,22 @@ const Builder = () => {
         model={model}
         onProviderChange={setProvider}
         onModelChange={setModel}
-        onExport={handleExport}
-        hasCode={parsedFiles.html.length > 0}
+        sessionID={sessionID}
+        isRunning={isGenerating}
+        onRunLoop={handleRunLoop}
+        onStop={stop}
+        onApplyNextPatch={handleApplyNextPatch}
+        onResetSession={handleResetSession}
       />
       <ResizablePanelGroup direction="horizontal" className="flex-1">
         {/* File Tree */}
         <ResizablePanel defaultSize={15} minSize={10} maxSize={25}>
           <FileTree
-            files={fileTree}
+            files={rootFiles}
             selectedFile={selectedFile?.path || null}
             onSelectFile={handleFileSelect}
+            onExpandDir={expandDir}
+            getChildren={getChildren}
           />
         </ResizablePanel>
         <ResizableHandle withHandle />
@@ -177,11 +255,10 @@ const Builder = () => {
                   filePath={selectedFile.path}
                   content={selectedFile.content}
                   language={selectedFile.language}
-                  onSave={handleFileSave}
                   onClose={handleCloseEditor}
                 />
               ) : (
-                <PreviewPanel code={generatedCode} isGenerating={isGenerating} />
+                <PreviewPanel code={{ html: "", css: "", js: "" }} isGenerating={isGenerating} />
               )}
             </ResizablePanel>
             <ResizableHandle withHandle />
