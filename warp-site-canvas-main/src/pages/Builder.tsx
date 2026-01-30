@@ -129,7 +129,34 @@ const Builder = () => {
             prev.map((m) => (m.id === assistantMessageId ? { ...m, content: fullResponse } : m)),
           );
         },
-        onDone: async (responseText) => {
+        onDone: async (responseText, msg) => {
+          const error = msg.info?.error?.message;
+          if (error) {
+            consoleLogs.error("OpenCode error", error);
+          }
+
+          if (!responseText.trim()) {
+            const types = Array.isArray(msg.parts)
+              ? msg.parts
+                  .map((p) => (p && typeof p.type === "string" ? p.type : "unknown"))
+                  .slice(0, 40)
+                  .join(", ")
+              : "(no parts)";
+
+            consoleLogs.info("OpenCode parts", types);
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantMessageId
+                  ? {
+                      ...m,
+                      content:
+                        "[OpenCode returned no text parts. Check Console for part types and any errors.]",
+                    }
+                  : m,
+              ),
+            );
+          }
+
           setIsGenerating(false);
           setStreamingContent("");
           abortRef.current = null;

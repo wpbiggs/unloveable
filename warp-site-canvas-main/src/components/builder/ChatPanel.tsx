@@ -112,11 +112,7 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent }: 
                   )}
                 >
                   {message.role === "assistant" && message.content ? (
-                    <div className="whitespace-pre-wrap">
-                      {message.content.length > 200 
-                        ? `${message.content.slice(0, 200)}... [Generating website]`
-                        : message.content || "Generating..."}
-                    </div>
+                    <div className="whitespace-pre-wrap">{message.content}</div>
                   ) : message.role === "assistant" && isGenerating ? (
                     <div className="flex gap-1">
                       <span className="w-2 h-2 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
