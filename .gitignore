@@ -1,0 +1,43 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.nuxt/
+.svelte-kit/
+coverage/
+.vite/
+.turbo/
+.cache/
+.eslintcache
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Archives
+*.zip
+
+# Backed up git dirs
+**/.git.bak-*

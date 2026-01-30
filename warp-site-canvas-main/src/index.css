@@ -1,0 +1,153 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+@layer base {
+  :root {
+    --background: 230 25% 5%;
+    --foreground: 210 40% 98%;
+
+    --card: 230 20% 8%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 230 20% 8%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 187 100% 50%;
+    --primary-foreground: 230 25% 5%;
+
+    --secondary: 270 80% 60%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 230 15% 15%;
+    --muted-foreground: 215 20% 65%;
+
+    --accent: 270 80% 60%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 230 15% 18%;
+    --input: 230 15% 12%;
+    --ring: 187 100% 50%;
+
+    --radius: 0.75rem;
+
+    /* Custom tokens for Surreal Sites */
+    --glow-cyan: 187 100% 50%;
+    --glow-purple: 270 80% 60%;
+    --glow-pink: 330 80% 60%;
+    
+    --gradient-start: 187 100% 50%;
+    --gradient-end: 270 80% 60%;
+
+    --sidebar-background: 230 20% 8%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 187 100% 50%;
+    --sidebar-primary-foreground: 230 25% 5%;
+    --sidebar-accent: 230 15% 15%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 230 15% 18%;
+    --sidebar-ring: 187 100% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Inter', sans-serif;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Space Grotesk', sans-serif;
+  }
+}
+
+@layer utilities {
+  .text-gradient {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, hsl(var(--glow-cyan)) 0%, hsl(var(--glow-purple)) 50%, hsl(var(--glow-pink)) 100%);
+  }
+
+  .bg-gradient-surreal {
+    background: linear-gradient(135deg, hsl(var(--glow-cyan) / 0.15) 0%, hsl(var(--glow-purple) / 0.15) 100%);
+  }
+
+  .border-gradient {
+    border: 1px solid transparent;
+    background: linear-gradient(hsl(var(--card)), hsl(var(--card))) padding-box,
+                linear-gradient(135deg, hsl(var(--glow-cyan) / 0.5), hsl(var(--glow-purple) / 0.5)) border-box;
+  }
+
+  .glow-cyan {
+    box-shadow: 0 0 20px hsl(var(--glow-cyan) / 0.3),
+                0 0 40px hsl(var(--glow-cyan) / 0.2),
+                0 0 60px hsl(var(--glow-cyan) / 0.1);
+  }
+
+  .glow-purple {
+    box-shadow: 0 0 20px hsl(var(--glow-purple) / 0.3),
+                0 0 40px hsl(var(--glow-purple) / 0.2),
+                0 0 60px hsl(var(--glow-purple) / 0.1);
+  }
+
+  .glow-mixed {
+    box-shadow: 0 0 30px hsl(var(--glow-cyan) / 0.25),
+                0 0 60px hsl(var(--glow-purple) / 0.2);
+  }
+
+  .animate-float {
+    animation: float 6s ease-in-out infinite;
+  }
+
+  .animate-pulse-glow {
+    animation: pulse-glow 3s ease-in-out infinite;
+  }
+
+  .animate-gradient {
+    background-size: 200% 200%;
+    animation: gradient-shift 8s ease infinite;
+  }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-10px); }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+@keyframes gradient-shift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: hsl(var(--muted));
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
+}
