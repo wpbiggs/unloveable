@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
-import { X } from "lucide-react";
+import { X, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
+import { useToast } from "@/hooks/use-toast";
+import { OpenCode } from "@/lib/opencode-client";
 
 interface CodeEditorProps {
   filePath: string;
@@ -13,6 +15,8 @@ interface CodeEditorProps {
 
 const CodeEditor = ({ filePath, content, language, onClose }: CodeEditorProps) => {
   const [editedContent, setEditedContent] = useState(content);
+  const [isSaving, setIsSaving] = useState(false);
+  const { toast } = useToast();
 
   useEffect(() => {
     setEditedContent(content);
@@ -22,7 +26,35 @@ const CodeEditor = ({ filePath, content, language, onClose }: CodeEditorProps) =
     setEditedContent(e.target.value);
   };
 
+  const handleSave = async () => {
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      await OpenCode.writeFile(filePath, editedContent);
+      toast({
+        title: "File saved",
+        description: `Successfully saved ${filePath}`,
+      });
+    } catch (error) {
+      console.warn("Failed to save file:", error);
+      toast({
+        variant: "destructive",
+        title: "Error saving file",
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Handle Ctrl+S / Cmd+S for save
+    if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+      e.preventDefault();
+      handleSave();
+      return;
+    }
+    
     // Handle tab key for indentation
     if (e.key === "Tab") {
       e.preventDefault();
@@ -53,9 +85,24 @@ const CodeEditor = ({ filePath, content, language, onClose }: CodeEditorProps) =
           >
             {filePath}
           </span>
-          <span className="text-[11px] text-muted-foreground">Read-only</span>
+          {editedContent !== content && (
+            <span className="text-[11px] text-yellow-400 font-medium">Unsaved changes</span>
+          )}
         </div>
         <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleSave}
+            disabled={isSaving || editedContent === content}
+            className={cn(
+              "h-7 px-2 text-xs gap-1.5",
+              editedContent !== content ? "text-primary hover:text-primary" : "text-muted-foreground"
+            )}
+          >
+            <Save className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Save</span>
+          </Button>
           <Button
             variant="ghost"
             size="icon"
@@ -75,7 +122,6 @@ const CodeEditor = ({ filePath, content, language, onClose }: CodeEditorProps) =
             onChange={handleChange}
             onKeyDown={handleKeyDown}
             spellCheck={false}
-            readOnly
             className={cn(
               "w-full h-full min-h-[400px] p-4 bg-transparent resize-none",
               "font-mono text-sm text-[#c9d1d9] leading-6",

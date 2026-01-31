@@ -9,13 +9,15 @@ import {
   DropdownMenuTrigger,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { ArrowLeft, ChevronDown, RefreshCw, RotateCcw, Play, Square, Wand2, FolderCog, Settings, MoreHorizontal } from "lucide-react";
+import { ArrowLeft, ChevronDown, RefreshCw, RotateCcw, Play, Square, Wand2, FolderCog, Settings, MoreHorizontal, Download } from "lucide-react";
 import { Link } from "react-router-dom";
 import { WORKSPACE_TEMPLATES } from "@/lib/workspace-templates";
 import type { LoopState } from "@/lib/builder-loop";
 import { OpenCode } from "@/lib/opencode-client";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { exportWorkspaceZip } from "@/lib/export-utils";
+import { OpenCodeDirectory } from "@/lib/opencode-client";
 
 interface BuilderHeaderProps {
   sessions: Array<{ id: string; title: string; updated: number }>;
@@ -63,6 +65,7 @@ const BuilderHeader = ({
   const [open, setOpen] = useState(false);
   const [changesOpen, setChangesOpen] = useState(false);
   const [changesLoading, setChangesLoading] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [status, setStatus] = useState<Array<{ path: string; status: string; added: number; removed: number }>>([]);
   const [diffs, setDiffs] = useState<Array<{ file: string; additions: number; deletions: number; before: string; after: string }>>([]);
   const [selectedDiff, setSelectedDiff] = useState<string | null>(null);
@@ -75,9 +78,9 @@ const BuilderHeader = ({
         OpenCode.fileStatus().catch(() => []),
         OpenCode.sessionDiff(sessionID, lastAssistantMessageID ?? undefined).catch(() => []),
       ]);
-      setStatus(s as any);
+      setStatus(s);
       setDiffs(
-        (d as any[]).map((x) => ({
+        d.map((x) => ({
           file: typeof x.file === "string" ? x.file : "(unknown)",
           additions: typeof x.additions === "number" ? x.additions : 0,
           deletions: typeof x.deletions === "number" ? x.deletions : 0,
@@ -89,6 +92,53 @@ const BuilderHeader = ({
       setChangesLoading(false);
     }
   }, [lastAssistantMessageID, sessionID]);
+
+  const handleExportZip = useCallback(async () => {
+    if (!directory) {
+      toast.error("No active directory to export");
+      return;
+    }
+    
+    setIsExporting(true);
+    try {
+      const loadFilesRecursively = async (dir: string): Promise<Array<{ path: string; content: string }>> => {
+        const nodes = await OpenCode.listFiles(dir);
+        const files: Array<{ path: string; content: string }> = [];
+        
+        for (const node of nodes) {
+          if (node.name === "node_modules" || node.name === ".git" || node.name === "dist" || node.name === ".opencode") continue;
+          
+          if (node.type === "directory") {
+            const subFiles = await loadFilesRecursively(node.path);
+            files.push(...subFiles);
+          } else {
+            const file = await OpenCode.readFile(node.path).catch(() => null);
+            if (file && file.content) {
+              // Ensure path is relative to the root being exported
+              // If node.path is absolute or relative to CWD, we need to handle it.
+              // OpenCode.listFiles returns paths relative to CWD if path argument is relative.
+              // But we can just rely on the path returned by listFiles as long as it's consistent.
+              // Assuming node.path is relative to the workspace root if we started from "." or similar.
+              files.push({ path: node.path, content: file.content });
+            }
+          }
+        }
+        return files;
+      };
+
+      // Start from current directory (which is what OpenCode.listFiles(".") queries)
+      const allFiles = await loadFilesRecursively(".");
+      const name = directory.split("/").pop() || "project";
+      
+      await exportWorkspaceZip(allFiles, name);
+      toast.success("Project exported to ZIP");
+    } catch (err) {
+      console.warn(err);
+      toast.error("Failed to export project");
+    } finally {
+      setIsExporting(false);
+    }
+  }, [directory]);
 
   const revertLast = useCallback(async () => {
     if (!sessionID || !lastAssistantMessageID) {
@@ -142,7 +192,7 @@ const BuilderHeader = ({
                 : "stream: unknown"
             }
           />
-          <Badge variant="outline">{loopState}</Badge>
+          <Badge variant="outline">{loopState} →</Badge>
           <Badge variant="outline">iter {iteration}</Badge>
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground mr-2">
@@ -208,6 +258,10 @@ const BuilderHeader = ({
                     {status.length}
                   </Badge>
                 </div>
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={handleExportZip} disabled={isExporting || !directory}>
+                <Download className="h-4 w-4 mr-2" />
+                {isExporting ? "Exporting..." : "Export to ZIP"}
               </DropdownMenuItem>
               <DropdownMenuItem onClick={onResetSession}>
                 <RotateCcw className="h-4 w-4 mr-2" />
