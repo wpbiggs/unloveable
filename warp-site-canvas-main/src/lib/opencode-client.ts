@@ -367,6 +367,13 @@ export const OpenCode = {
     return requestJson<OpenCodeFileContent>("/file/content", undefined, { path });
   },
 
+  async writeFile(path: string, content: string) {
+    return requestJson<void>("/file/content", {
+      method: "PUT",
+      body: JSON.stringify({ content }),
+    }, { path });
+  },
+
   async fileStatus() {
     return requestJson<Array<{ path: string; status: "added" | "deleted" | "modified"; added: number; removed: number }>>(
       "/file/status",

@@ -1,11 +1,13 @@
 import { useMemo, useState, useRef, useEffect } from "react";
-import { Send, Sparkles, User, Activity, Paperclip, ImagePlus, X } from "lucide-react";
+import { Send, Sparkles, User, Activity, Paperclip, ImagePlus, X, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Message } from "@/lib/ai-config";
 import { cn } from "@/lib/utils";
 import type { ConsoleLog } from "@/hooks/use-console-logs";
 import type { QuestionSpec } from "@/lib/question-extract";
+
+import { Progress } from "@/components/ui/progress";
 
 function sanitizeAssistantText(text: string) {
   const src = (text || "").trim();
@@ -283,17 +285,32 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent, ac
                       ) : null}
                     </div>
                   ) : message.role === "assistant" && isGenerating ? (
-                    <div className="space-y-2">
-                      <div className="flex gap-1">
-                        <span className="w-2 h-2 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                        <span className="w-2 h-2 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                        <span className="w-2 h-2 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                    <div className="space-y-3 min-w-[200px]" data-testid="ai-loading-indicator">
+                      <div className="flex items-center gap-2 text-muted-foreground text-sm">
+                        <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                        <span className="font-medium text-foreground">Thinking...</span>
                       </div>
+                      
                       {activity ? (
-                        <div className="text-xs text-muted-foreground">
-                          {activity.loopState} • iter {activity.iteration}
+                        <div className="space-y-1.5 pl-6">
+                           <div className="flex justify-between text-xs text-muted-foreground">
+                             <span>{activity.loopState}</span>
+                             <span>Iter {activity.iteration}</span>
+                           </div>
+                           <Progress 
+                             value={
+                               activity.loopState === "PLANNING" ? 10 :
+                               activity.loopState === "RUNNING" ? 50 : 
+                               activity.loopState === "OBSERVING" ? 90 : 
+                               activity.loopState === "PATCHING" ? 70 : 
+                               activity.loopState === "COMPLETED" ? 100 : 0
+                             } 
+                             className="h-1.5 bg-muted-foreground/20"
+                             data-testid="ai-progress-bar"
+                           />
                         </div>
                       ) : null}
+
                     </div>
                   ) : (
                     <div className="whitespace-pre-wrap">
@@ -501,7 +518,7 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent, ac
           </DialogHeader>
 
           {activity?.lastError ? (
-            <pre className="text-xs rounded-md border border-border bg-muted/30 p-3 whitespace-pre-wrap">{activity.lastError}</pre>
+            <pre className="text-xs rounded-md border border-border bg-red-500/10 text-red-500 p-3 whitespace-pre-wrap font-mono">{activity.lastError}</pre>
           ) : null}
 
           {activity?.pageSpec ? (

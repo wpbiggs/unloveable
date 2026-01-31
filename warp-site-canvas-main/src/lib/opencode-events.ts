@@ -1,6 +1,6 @@
 type OpenCodeBusEvent = {
   type: string;
-  properties: any;
+  properties: Record<string, unknown>;
 };
 
 type OpenCodeWireEvent =
@@ -28,7 +28,7 @@ function directoryParam() {
 }
 
 export function openOpenCodeEvents(onEvent: (evt: OpenCodeBusEvent) => void) {
-  if (typeof (globalThis as any).EventSource !== "function") {
+  if (typeof EventSource !== "function") {
     return () => undefined;
   }
 
@@ -48,14 +48,22 @@ export function openOpenCodeEvents(onEvent: (evt: OpenCodeBusEvent) => void) {
 
   es.onmessage = (m) => {
     try {
-      const parsed = JSON.parse(m.data) as OpenCodeWireEvent;
+      const parsed = JSON.parse(m.data) as unknown;
       if (!parsed || typeof parsed !== "object") return;
 
       const payload = (() => {
-        const direct = parsed as any;
-        if (direct && typeof direct.type === "string") return direct as OpenCodeBusEvent;
-        const wrapped = (parsed as any).payload;
-        if (wrapped && typeof wrapped.type === "string") return wrapped as OpenCodeBusEvent;
+        // Direct event?
+        if ("type" in parsed && typeof (parsed as Record<string, unknown>).type === "string") {
+            return parsed as OpenCodeBusEvent;
+        }
+
+        // Wrapped event?
+        if ("payload" in parsed) {
+            const wrapped = (parsed as Record<string, unknown>).payload;
+             if (wrapped && typeof wrapped === "object" && "type" in wrapped && typeof (wrapped as Record<string, unknown>).type === "string") {
+                return wrapped as OpenCodeBusEvent;
+             }
+        }
         return null;
       })();
 

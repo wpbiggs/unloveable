@@ -31,9 +31,9 @@ const HeroSection = () => {
           </div>
           
           <h1 className="font-display text-5xl md:text-7xl font-bold tracking-tight mb-6">
-            <span className="text-foreground">Dream it.</span>
+            <span className="text-foreground">Create it.</span>
             <br />
-            <span className="text-gradient">Build it.</span>
+            <span className="text-gradient">Ship it.</span>
           </h1>
           
           <p className="text-lg md:text-xl text-muted-foreground max-w-2xl mx-auto mb-12">

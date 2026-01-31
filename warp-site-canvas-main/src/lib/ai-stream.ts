@@ -113,7 +113,9 @@ export async function streamChat({
 
     onDone(fullResponse);
   } catch (error) {
-    console.error("Stream error:", error);
+    if (process.env.NODE_ENV === "development") {
+      console.warn("Stream error:", error);
+    }
     onError(error instanceof Error ? error.message : "Unknown error");
   }
 }

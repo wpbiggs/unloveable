@@ -1,4 +1,6 @@
 const KEY_ROOT = "opencode.workspace.root";
+const KEY_PROJECT_ID = "opencode.workspace.projectID";
+const KEY_RECENT = "opencode.workspace.recent";
 const KEY_SHARED = "opencode.workspace.linkShared";
 const KEY_AUTO = "opencode.workspace.autoCreate";
 const KEY_TEMPLATE = "opencode.workspace.defaultTemplate";
@@ -7,9 +9,9 @@ const KEY_SUPABASE_ENABLED = "opencode.supabase.enabled";
 const KEY_SUPABASE_URL = "opencode.supabase.url";
 const KEY_SUPABASE_ANON = "opencode.supabase.anonKey";
 
-function get() {
+function get(key: string) {
   try {
-    const v = window.localStorage.getItem(KEY_ROOT);
+    const v = window.localStorage.getItem(key);
     if (v && v.trim()) return v.trim();
   } catch {
     // ignore
@@ -17,13 +19,13 @@ function get() {
   return null;
 }
 
-function set(value: string | null) {
+function set(key: string, value: string | null) {
   try {
     if (!value || !value.trim()) {
-      window.localStorage.removeItem(KEY_ROOT);
+      window.localStorage.removeItem(key);
       return;
     }
-    window.localStorage.setItem(KEY_ROOT, value.trim());
+    window.localStorage.setItem(key, value.trim());
   } catch {
     // ignore
   }
@@ -31,9 +33,49 @@ function set(value: string | null) {
 
 export const OpenCodeWorkspace = {
   root: {
-    get,
-    set,
+    get() {
+      return get(KEY_ROOT);
+    },
+    set(value: string | null) {
+      set(KEY_ROOT, value);
+    },
     defaultValue: "/home/will/opencode-test/workspaces",
+  },
+  project: {
+    get() {
+      return get(KEY_PROJECT_ID);
+    },
+    set(value: string | null) {
+      set(KEY_PROJECT_ID, value);
+    },
+  },
+  recent: {
+    get() {
+      try {
+        const raw = window.localStorage.getItem(KEY_RECENT);
+        const parsed = raw ? JSON.parse(raw) : [];
+        if (Array.isArray(parsed) && parsed.every(s => typeof s === "string")) return parsed as string[];
+      } catch {
+        // ignore
+      }
+      return [];
+    },
+    set(value: string[]) {
+      try {
+        window.localStorage.setItem(KEY_RECENT, JSON.stringify(value));
+      } catch {
+        // ignore
+      }
+    },
+    add(path: string) {
+      const current = this.get();
+      const next = [path, ...current.filter(p => p !== path)].slice(0, 20); // Keep top 20
+      this.set(next);
+    },
+    remove(path: string) {
+      const current = this.get();
+      this.set(current.filter(p => p !== path));
+    }
   },
   linkShared: {
     get() {

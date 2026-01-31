@@ -8,6 +8,7 @@ import Builder from "./pages/Builder";
 import OpenCodeSettings from "./pages/OpenCodeSettings";
 import Product from "./pages/Product";
 import NotFound from "./pages/NotFound";
+import AuthPage from "./pages/Auth";
 
 const queryClient = new QueryClient();
 
@@ -19,6 +20,7 @@ const App = () => (
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Index />} />
+          <Route path="/auth" element={<AuthPage />} />
           <Route path="/builder" element={<Builder />} />
           <Route path="/product" element={<Product />} />
           <Route path="/builder/settings" element={<OpenCodeSettings />} />

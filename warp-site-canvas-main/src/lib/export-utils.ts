@@ -95,6 +95,43 @@ ${files.js || "// No scripts"}
 }
 
 /**
+ * Export a workspace (list of files) as a ZIP file
+ */
+export async function exportWorkspaceZip(
+  files: Array<{ path: string; content: string }>, 
+  projectName: string = "workspace"
+): Promise<void> {
+  const zip = new JSZip();
+  
+  for (const file of files) {
+    // JSZip handles nested paths automatically (e.g. "src/App.tsx")
+    // Normalize path to remove leading slash or ./ which might confuse some zip readers
+    let normalizedPath = file.path;
+    if (normalizedPath.startsWith('/')) {
+      normalizedPath = normalizedPath.substring(1);
+    } else if (normalizedPath.startsWith('./')) {
+      normalizedPath = normalizedPath.substring(2);
+    }
+    
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const options: any = {};
+    if ((file as any).encoding === 'base64') {
+      options.base64 = true;
+    }
+    
+    if (Object.keys(options).length > 0) {
+      zip.file(normalizedPath, file.content, options);
+    } else {
+      zip.file(normalizedPath, file.content);
+    }
+  }
+  
+  const blob = await zip.generateAsync({ type: "blob" });
+  const filename = `${projectName.toLowerCase().replace(/\s+/g, "-")}-${Date.now()}.zip`;
+  saveAs(blob, filename);
+}
+
+/**
  * Export a single file
  */
 export function exportFile(content: string, filename: string, mimeType: string = "text/plain"): void {

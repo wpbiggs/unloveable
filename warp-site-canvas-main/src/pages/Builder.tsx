@@ -779,7 +779,13 @@ const Builder = () => {
     };
 
     // Self-check: Builder should render (no overlay / uncaught errors)
-    const selfUrl = `${window.location.origin}/builder`;
+    // We must probe "localhost" because the shell runs in the same container/netns as the server.
+    // window.location.origin might be an external IP (if accessed from LAN) which the container can't resolve or reach.
+    const port = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
+    const selfUrl = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+      ? `${window.location.origin}/builder`
+      : `${window.location.protocol}//localhost:${port}/builder`;
+
     const selfBase = `.opencode/observe/builder-${iter}`;
     const self = await chromeProbe(selfUrl, selfBase);
     if (!self.ok) {

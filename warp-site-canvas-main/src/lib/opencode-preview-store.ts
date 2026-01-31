@@ -19,10 +19,11 @@ function read(): Record<string, Entry> {
     const out: Record<string, Entry> = {};
     for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
       if (!v || typeof v !== "object" || Array.isArray(v)) continue;
-      const url = (v as any).url;
+      const val = v as Record<string, unknown>;
+      const url = val.url;
       if (typeof url !== "string" || !url.trim()) continue;
-      const pid = (v as any).pid;
-      const startedAt = (v as any).startedAt;
+      const pid = val.pid;
+      const startedAt = val.startedAt;
       out[k] = {
         url,
         pid: typeof pid === "number" ? pid : undefined,
