@@ -86,7 +86,7 @@ export async function publishToGitHub(
         // Ignore network errors on check, assume new file
       }
 
-      const putBody: any = {
+      const putBody: { message: string; content: string; branch: string; sha?: string } = {
         message: `Add ${cleanPath}`,
         content: btoa(file.content), // Base64 encode
         branch: repoData.default_branch || 'main',
@@ -116,11 +116,10 @@ export async function publishToGitHub(
       repoUrl: htmlUrl,
     };
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } catch (error: any) {
+    } catch (error: unknown) {
       return {
         success: false,
-        error: error.message || 'Unknown error occurred',
+        error: error instanceof Error ? error.message : 'Unknown error occurred',
       };
     }
   }

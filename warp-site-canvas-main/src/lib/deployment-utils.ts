@@ -1,8 +1,13 @@
 
 // Placeholder for deployment utils
+export interface ProjectFile {
+  path: string;
+  content: string;
+}
+
 export interface ProjectData {
   name: string;
-  files: any[];
+  files: ProjectFile[];
 }
 
 export async function deployToVercel(projectData: ProjectData): Promise<string> {
@@ -29,6 +34,15 @@ export async function deployToVercel(projectData: ProjectData): Promise<string> 
     throw new Error(`Deployment failed: ${response.statusText}`);
   }
 
-  const data = await response.json();
-  return data.url;
+  const data: unknown = await response.json();
+  const url =
+    data && typeof data === "object" && "url" in data
+      ? (data as { url?: unknown }).url
+      : undefined;
+
+  if (typeof url !== "string" || url.length === 0) {
+    throw new Error("Deployment failed: missing url");
+  }
+
+  return url;
 }

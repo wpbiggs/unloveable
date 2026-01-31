@@ -98,7 +98,7 @@ ${files.js || "// No scripts"}
  * Export a workspace (list of files) as a ZIP file
  */
 export async function exportWorkspaceZip(
-  files: Array<{ path: string; content: string }>, 
+  files: Array<{ path: string; content: string; encoding?: "base64" }>,
   projectName: string = "workspace"
 ): Promise<void> {
   const zip = new JSZip();
@@ -113,11 +113,8 @@ export async function exportWorkspaceZip(
       normalizedPath = normalizedPath.substring(2);
     }
     
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const options: any = {};
-    if ((file as any).encoding === 'base64') {
-      options.base64 = true;
-    }
+    const options: { base64?: true } = {};
+    if (file.encoding === "base64") options.base64 = true;
     
     if (Object.keys(options).length > 0) {
       zip.file(normalizedPath, file.content, options);

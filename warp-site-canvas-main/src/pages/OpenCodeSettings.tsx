@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowLeft, ExternalLink, RefreshCw, Save, Trash2 } from "lucide-react";
+import { ArrowLeft, ChevronRight, ExternalLink, Folder, RefreshCw, Save, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
@@ -10,6 +10,9 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   OpenCode,
   OpenCodeDirectory,
+  type OpenCodeConfig,
+  type OpenCodeFileNode,
+  type OpenCodeMessagePart,
   type OpenCodeProviderAuthMethodsResponse,
   type OpenCodeProviderAuthorization,
   type OpenCodeProviderInfo,
@@ -27,6 +30,36 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
+type JsonRecord = Record<string, unknown>;
+
+function isObj(input: unknown): input is JsonRecord {
+  return !!input && typeof input === "object";
+}
+
+function readMessageId(msg: unknown) {
+  if (!isObj(msg)) return "";
+  const info = isObj(msg.info) ? msg.info : null;
+  const infoId = info && typeof info.id === "string" ? info.id : "";
+  if (infoId) return infoId;
+  return typeof msg.id === "string" ? msg.id : "";
+}
+
+function parseAttachmentsFromToolState(state: unknown) {
+  const out: Array<{ url: string; mime: string; filename?: string }> = [];
+  if (!isObj(state)) return out;
+  const att = state.attachments;
+  if (!Array.isArray(att)) return out;
+  for (const a of att) {
+    if (!isObj(a)) continue;
+    const url = typeof a.url === "string" ? a.url : "";
+    if (!url) continue;
+    const mime = typeof a.mime === "string" ? a.mime : "application/octet-stream";
+    const filename = typeof a.filename === "string" ? a.filename : undefined;
+    out.push({ url, mime, filename });
+  }
+  return out;
+}
+
 const OpenCodeSettings = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [providers, setProviders] = useState<OpenCodeProviderInfo[]>([]);
@@ -35,6 +68,12 @@ const OpenCodeSettings = () => {
   const [providerID, setProviderID] = useState<string>("openai");
   const [apiKey, setApiKey] = useState<string>("");
   const [directory, setDirectory] = useState<string | null>(() => OpenCodeDirectory.get());
+  const [dirPickerOpen, setDirPickerOpen] = useState(false);
+  const [dirPickerPath, setDirPickerPath] = useState<string>(".");
+  const [dirPickerItems, setDirPickerItems] = useState<OpenCodeFileNode[]>([]);
+  const [dirPickerAbsBase, setDirPickerAbsBase] = useState<string>("");
+  const [dirPickerAbsWorktree, setDirPickerAbsWorktree] = useState<string>("");
+  const [dirPickerBusy, setDirPickerBusy] = useState(false);
   const [baseURL, setBaseURL] = useState<string>("");
   const [enabledProvidersRaw, setEnabledProvidersRaw] = useState<string>("");
   const [disabledProvidersRaw, setDisabledProvidersRaw] = useState<string>("");
@@ -67,6 +106,75 @@ const OpenCodeSettings = () => {
   const baseUrl = (import.meta.env.VITE_OPENCODE_URL as string | undefined) || "http://localhost:4096";
   const supabaseStackDir = `${(workspaceRoot.trim() || OpenCodeWorkspace.root.defaultValue).replace(/\/$/, "")}/_infra/supabase`;
 
+  const requestJsonNoDirectory = useCallback(
+    async <T,>(pathname: string, query?: Record<string, string | undefined>): Promise<T> => {
+      const url = new URL(baseUrl.replace(/\/$/, "") + pathname);
+      for (const [k, v] of Object.entries(query ?? {})) {
+        if (v === undefined) continue;
+        url.searchParams.set(k, v);
+      }
+      const res = await fetch(url.toString(), { headers: { "Content-Type": "application/json" } });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || `OpenCode request failed (${res.status})`);
+      }
+      return (await res.json()) as T;
+    },
+    [baseUrl],
+  );
+
+  const normalizePickerPath = useCallback((p: string) => {
+    const v = (p || ".").trim();
+    if (!v || v === "/") return ".";
+    return v.replace(/^\.\//, "");
+  }, []);
+
+  const joinPickerPath = useCallback(
+    (base: string, child: string) => {
+      const b = normalizePickerPath(base);
+      const c = (child || "").trim().replace(/^\.\//, "").replace(/^\//, "");
+      if (!c) return b;
+      if (b === ".") return c;
+      return `${b}/${c}`;
+    },
+    [normalizePickerPath],
+  );
+
+  const parentPickerPath = useCallback(
+    (p: string) => {
+      const v = normalizePickerPath(p);
+      if (v === ".") return ".";
+      const parts = v.split("/").filter(Boolean);
+      parts.pop();
+      return parts.length ? parts.join("/") : ".";
+    },
+    [normalizePickerPath],
+  );
+
+  const loadDirectoryPicker = useCallback(
+    async (path: string) => {
+      const p = normalizePickerPath(path);
+      setDirPickerBusy(true);
+      try {
+        const info = await requestJsonNoDirectory<{ directory: string; worktree: string }>("/path");
+        setDirPickerAbsBase(info.directory);
+        setDirPickerAbsWorktree(info.worktree);
+
+        const items = await requestJsonNoDirectory<OpenCodeFileNode[]>("/file", { path: p });
+        const dirs = items
+          .filter((x) => x.type === "directory" && !x.ignored)
+          .sort((a, b) => a.name.localeCompare(b.name));
+        setDirPickerItems(dirs);
+        setDirPickerPath(p);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to list directories");
+      } finally {
+        setDirPickerBusy(false);
+      }
+    },
+    [normalizePickerPath, requestJsonNoDirectory],
+  );
+
   const ensureShellSession = useCallback(async () => {
     if (shellSessionID) return shellSessionID;
     const session = await OpenCode.createSession();
@@ -86,17 +194,20 @@ const OpenCodeSettings = () => {
     async (command: string) => {
       const id = await ensureShellSession();
       const msg = await OpenCode.runShell(id, command, { agent: OpenCodePreferences.agent.get() ?? "task" });
-      const messageID = typeof (msg as any)?.id === "string" ? ((msg as any).id as string) : "";
+      const messageID = readMessageId(msg);
       if (!messageID) return "";
 
       const full = await OpenCode.getMessage(id, messageID).catch(() => null);
-      const parts = full && Array.isArray((full as any).parts) ? ((full as any).parts as any[]) : [];
+      const parts = full?.parts ?? [];
       const out: string[] = [];
       for (const p of parts) {
         if (!p || p.type !== "tool") continue;
-        const state = p.state;
-        if (state?.status === "completed" && typeof state.output === "string" && state.output) out.push(state.output);
-        if (state?.status === "error" && typeof state.error === "string" && state.error) out.push(state.error);
+        const state = isObj(p.state) ? p.state : null;
+        const status = state && typeof state.status === "string" ? state.status : "";
+        const output = state && typeof state.output === "string" ? state.output : "";
+        const err = state && typeof state.error === "string" ? state.error : "";
+        if (status === "completed" && output) out.push(output);
+        if (status === "error" && err) out.push(err);
       }
       return out.join("\n").trim();
     },
@@ -227,21 +338,27 @@ EOF`,
       setConnected(list.connected);
       setMethods(authMethods);
 
-      const cfgProvider = (cfg.provider as any)?.[providerID] as any;
-      const cfgBase = cfgProvider?.options?.baseURL;
-      setBaseURL(typeof cfgBase === "string" ? cfgBase : "");
+      const config = cfg as OpenCodeConfig;
 
-      const cfgModel = (cfg as any).model;
-      setDefaultModel(typeof cfgModel === "string" ? cfgModel : "");
-      const cfgSmall = (cfg as any).small_model;
-      setSmallModel(typeof cfgSmall === "string" ? cfgSmall : "");
+      const providerCfg = (() => {
+        const prov = config.provider;
+        if (!prov || typeof prov !== "object") return null;
+        const entry = (prov as Record<string, unknown>)[providerID];
+        return isObj(entry) ? entry : null;
+      })();
+      const options = providerCfg && isObj(providerCfg.options) ? providerCfg.options : null;
+      const cfgBase = options && typeof options.baseURL === "string" ? options.baseURL : "";
+      setBaseURL(cfgBase);
 
-      const agent = (cfg as any).agent;
-      const keys = agent && typeof agent === "object" ? Object.keys(agent as Record<string, unknown>) : [];
-      setAgentKeys(keys.sort((a, b) => a.localeCompare(b)));
+      setDefaultModel(typeof config.model === "string" ? config.model : "");
+      setSmallModel(typeof config.small_model === "string" ? config.small_model : "");
 
-      const enabled = Array.isArray((cfg as any).enabled_providers) ? ((cfg as any).enabled_providers as unknown[]) : [];
-      const disabled = Array.isArray((cfg as any).disabled_providers) ? ((cfg as any).disabled_providers as unknown[]) : [];
+      const agent = config.agent;
+      const keys = isObj(agent) ? Object.keys(agent).sort((a, b) => a.localeCompare(b)) : [];
+      setAgentKeys(keys);
+
+      const enabled = Array.isArray(config.enabled_providers) ? (config.enabled_providers as unknown[]) : [];
+      const disabled = Array.isArray(config.disabled_providers) ? (config.disabled_providers as unknown[]) : [];
       setEnabledProvidersRaw(enabled.filter((x) => typeof x === "string").join(", "));
       setDisabledProvidersRaw(disabled.filter((x) => typeof x === "string").join(", "));
 
@@ -273,14 +390,29 @@ EOF`,
     refresh();
   }, [refresh]);
 
-  const handleSetDirectory = useCallback(async () => {
-    const current = OpenCodeDirectory.get() ?? "/home/will/opencode-test/warp-site-canvas-main";
-    const next = window.prompt("OpenCode directory (absolute path)", current);
-    if (next === null) return;
-    OpenCodeDirectory.set(next);
-    setDirectory(OpenCodeDirectory.get());
-    toast.success("Directory updated");
-  }, []);
+  const handleBrowseDirectory = useCallback(async () => {
+    setDirPickerOpen(true);
+    // Use current override as a hint, but browse from server root.
+    await loadDirectoryPicker(".");
+  }, [loadDirectoryPicker]);
+
+  const applyDirectoryOverride = useCallback(
+    (relative: string) => {
+      const rel = normalizePickerPath(relative);
+      if (!dirPickerAbsWorktree || !dirPickerAbsBase) {
+        toast.error("Server path info not loaded yet");
+        return;
+      }
+
+      // If we're browsing from server directory, rel is relative to that.
+      const abs = rel === "." ? dirPickerAbsBase : `${dirPickerAbsBase.replace(/\/$/, "")}/${rel}`;
+      OpenCodeDirectory.set(abs);
+      setDirectory(OpenCodeDirectory.get());
+      toast.success("Directory updated");
+      setDirPickerOpen(false);
+    },
+    [dirPickerAbsBase, dirPickerAbsWorktree, normalizePickerPath],
+  );
 
   const handleSaveKey = useCallback(async () => {
     const key = apiKey.trim();
@@ -313,19 +445,18 @@ EOF`,
 
     setIsLoading(true);
     try {
-      await OpenCode.patchConfig({
-        model: defaultModel.trim() || undefined,
-        small_model: smallModel.trim() || undefined,
-        enabled_providers: enabled.length ? (enabled as any) : undefined,
-        disabled_providers: disabled.length ? (disabled as any) : undefined,
-        provider: {
-          [providerID]: {
-            options: {
-              baseURL: nextBase || undefined,
-            },
-          },
-        } as any,
-      });
+      const patch: OpenCodeConfig = {};
+      const model = defaultModel.trim();
+      const small = smallModel.trim();
+      if (model) patch.model = model;
+      if (small) patch.small_model = small;
+      if (enabled.length) patch.enabled_providers = enabled;
+      if (disabled.length) patch.disabled_providers = disabled;
+
+      const providerPatch = { [providerID]: { options: nextBase ? { baseURL: nextBase } : {} } };
+      patch.provider = providerPatch as unknown as OpenCodeConfig["provider"];
+
+      await OpenCode.patchConfig(patch);
       toast.success("Saved config to server");
       await refresh();
     } catch (err) {
@@ -446,8 +577,8 @@ EOF`,
             Credentials are stored on the server in <span className="font-mono text-foreground">~/.local/share/opencode/auth.json</span>.
           </div>
           <div className="mt-3 flex gap-2">
-            <Button variant="secondary" size="sm" onClick={handleSetDirectory} disabled={isLoading}>
-              Set Directory
+            <Button variant="secondary" size="sm" onClick={handleBrowseDirectory} disabled={isLoading}>
+              Browse Directories
             </Button>
             <Button
               variant="secondary"
@@ -463,6 +594,88 @@ EOF`,
             </Button>
           </div>
         </Card>
+
+        <Dialog
+          open={dirPickerOpen}
+          onOpenChange={(open) => {
+            setDirPickerOpen(open);
+            if (open) return;
+            setDirPickerItems([]);
+            setDirPickerPath(".");
+          }}
+        >
+          <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
+            <DialogHeader>
+              <DialogTitle>Select OpenCode Directory</DialogTitle>
+              <DialogDescription>
+                Choose a folder within the server worktree. Server: <span className="font-mono text-foreground">{baseUrl}</span>
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              <div className="rounded-md border border-border bg-muted/20">
+              <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+                <div className="min-w-0 text-sm">
+                  <div className="text-xs text-muted-foreground">Worktree</div>
+                  <div className="truncate font-mono text-foreground">{dirPickerAbsWorktree || "(loading...)"}</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => loadDirectoryPicker(parentPickerPath(dirPickerPath))}
+                    disabled={dirPickerBusy || normalizePickerPath(dirPickerPath) === "."}
+                  >
+                    Up
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={() => loadDirectoryPicker(".")} disabled={dirPickerBusy}>
+                    Root
+                  </Button>
+                </div>
+              </div>
+
+              <div className="px-3 py-2 text-sm">
+                <div className="text-xs text-muted-foreground">Current</div>
+                <div className="font-mono text-foreground">{normalizePickerPath(dirPickerPath)}</div>
+              </div>
+
+              <div className="max-h-[360px] overflow-auto border-t border-border">
+                {dirPickerBusy ? (
+                  <div className="px-3 py-4 text-sm text-muted-foreground">Loading…</div>
+                ) : dirPickerItems.length ? (
+                  <div className="divide-y divide-border">
+                    {dirPickerItems.map((item) => (
+                      <button
+                        key={item.path}
+                        type="button"
+                        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-muted/50"
+                        onClick={() => loadDirectoryPicker(item.path)}
+                      >
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Folder className="h-4 w-4 text-muted-foreground" />
+                          <span className="truncate">{item.name}</span>
+                        </div>
+                        <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="px-3 py-4 text-sm text-muted-foreground">No subfolders found here.</div>
+                )}
+              </div>
+              </div>
+            </div>
+
+            <DialogFooter>
+              <Button variant="secondary" onClick={() => setDirPickerOpen(false)} disabled={dirPickerBusy}>
+                Cancel
+              </Button>
+              <Button onClick={() => applyDirectoryOverride(dirPickerPath)} disabled={dirPickerBusy}>
+                Use This Directory
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         <Card className="p-4">
           <div className="text-sm font-medium">Workspaces</div>

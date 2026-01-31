@@ -1,4 +1,5 @@
 import { Hono } from "hono"
+import { HTTPException } from "hono/http-exception"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import z from "zod"
 import { File } from "../../file"
@@ -139,6 +140,9 @@ export const FileRoutes = lazy(() =>
       ),
       async (c) => {
         const path = c.req.valid("query").path
+        if (!Instance.containsPath(path)) {
+          throw new HTTPException(403, { message: "Access forbidden: path is outside of project" })
+        }
         const content = await File.list(path)
         return c.json(content)
       },
@@ -168,6 +172,9 @@ export const FileRoutes = lazy(() =>
       ),
       async (c) => {
         const path = c.req.valid("query").path
+        if (!Instance.containsPath(path)) {
+          throw new HTTPException(403, { message: "Access forbidden: path is outside of project" })
+        }
         const content = await File.read(path)
         return c.json(content)
       },

@@ -46,18 +46,22 @@ function extractErrorMessage(msg: OpenCodeMessageResponse) {
   return "";
 }
 
-function summarizeToolPart(p: any) {
-  if (!p || p.type !== "tool") return "";
+function isObj(input: unknown): input is Record<string, unknown> {
+  return !!input && typeof input === "object";
+}
+
+function summarizeToolPart(p: unknown) {
+  if (!isObj(p) || p.type !== "tool") return "";
   const tool = safeString(p.tool) || "tool";
-  const state = p.state;
-  const status = safeString(state?.status);
+  const state = isObj(p.state) ? p.state : undefined;
+  const status = safeString(state ? state.status : undefined);
   if (status === "completed") {
-    const out = safeString(state?.output);
+    const out = safeString(state ? state.output : undefined);
     if (!out) return `[${tool}] completed`;
     return `[${tool}]\n${out}`;
   }
   if (status === "error") {
-    const err = safeString(state?.error);
+    const err = safeString(state ? state.error : undefined);
     if (!err) return `[${tool}] error`;
     return `[${tool}] error\n${err}`;
   }
@@ -74,14 +78,15 @@ function formatAssistantMessage(msg: OpenCodeMessageResponse) {
 
   for (const p of parts) {
     if (!p || typeof p !== "object") continue;
-    const type = (p as any).type;
+    const part = p as Record<string, unknown>;
+    const type = part.type;
     if (type === "text" || type === "reasoning") {
-      const t = safeString((p as any).text);
+      const t = safeString(part.text);
       if (t) textBlocks.push(t);
       continue;
     }
     if (type === "patch") {
-      const files = (p as any).files;
+      const files = part.files;
       if (Array.isArray(files)) {
         for (const f of files) {
           if (typeof f === "string" && f.trim()) patchFiles.add(f.trim());
@@ -95,7 +100,7 @@ function formatAssistantMessage(msg: OpenCodeMessageResponse) {
       continue;
     }
     if (type === "step-finish") {
-      const reason = safeString((p as any).reason);
+      const reason = safeString(part.reason);
       if (reason) finishes.push(reason);
       continue;
     }

@@ -1,29 +1,45 @@
+import { toast } from "sonner";
 import { useCallback, useMemo, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Button } from "../ui/button";
+import { Badge } from "../ui/badge";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
   DropdownMenuSeparator,
-} from "@/components/ui/dropdown-menu";
-import { ArrowLeft, ChevronDown, RefreshCw, RotateCcw, Play, Square, Wand2, FolderCog, Settings, MoreHorizontal, Download } from "lucide-react";
-import { Link } from "react-router-dom";
+} from "../ui/dropdown-menu";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../ui/alert-dialog";
+import { ArrowLeft, ChevronDown, RefreshCw, RotateCcw, Play, Square, Wand2, FolderCog, Settings, MoreHorizontal, Download, CloudUpload, Undo2 } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
+import { cn } from "../../lib/utils";
+import { ComponentPicker } from "./ComponentPicker";
+import { TemplateGallery } from "./TemplateGallery";
+import { ThemeCustomizer } from "./ThemeCustomizer";
+import { KeyboardShortcutsDialog } from "./KeyboardShortcutsDialog";
 import { WORKSPACE_TEMPLATES } from "@/lib/workspace-templates";
-import type { LoopState } from "@/lib/builder-loop";
+import { LoopState } from "@/lib/builder-loop";
 import { OpenCode } from "@/lib/opencode-client";
-import { toast } from "sonner";
-import { cn } from "@/lib/utils";
 import { exportWorkspaceZip } from "@/lib/export-utils";
-import { OpenCodeDirectory } from "@/lib/opencode-client";
+import { deployToVercel } from "@/lib/deployment-utils";
+import { publishToGitHub } from "@/lib/github-utils";
+import { DiffViewer } from "./DiffViewer";
 
 interface BuilderHeaderProps {
   sessions: Array<{ id: string; title: string; updated: number }>;
   isSessionsLoading: boolean;
   onRefreshSessions: () => void;
-  onSelectSession: (sessionID: string) => void;
+  onSelectSession: (id: string) => void;
   sessionID: string | null;
   lastAssistantMessageID?: string | null;
   directory: string | null;
@@ -31,21 +47,21 @@ interface BuilderHeaderProps {
   iteration: number;
   isRunning: boolean;
   onRunLoop: () => void;
+  onRunHeadless?: () => void;
   onStop: () => void;
   onApplyNextPatch: () => void;
   onResetSession: () => void;
-  onNewWorkspaceSession: (template?: string) => void;
+  onNewWorkspaceSession: (template: string) => void;
   onChangeDirectory: () => void;
+  onUndo?: () => void;
+  onRequestComponent?: (prompt: string) => void;
   sseStatus?: { state: "connecting" | "connected" | "error"; lastAt: number };
 }
-
-const TEMPLATES = WORKSPACE_TEMPLATES;
-
-import { OpenCodeWorkspace } from "@/lib/opencode-workspace";
 
 const BuilderHeader = ({
   sessions,
   isSessionsLoading,
+
   onRefreshSessions,
   onSelectSession,
   sessionID,
@@ -55,21 +71,29 @@ const BuilderHeader = ({
   iteration,
   isRunning,
   onRunLoop,
+  onRunHeadless,
   onStop,
   onApplyNextPatch,
   onResetSession,
   onNewWorkspaceSession,
   onChangeDirectory,
+  onUndo,
+  onRequestComponent,
   sseStatus,
 }: BuilderHeaderProps) => {
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [changesOpen, setChangesOpen] = useState(false);
+  const [galleryOpen, setGalleryOpen] = useState(false);
   const [changesLoading, setChangesLoading] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [isDeploying, setIsDeploying] = useState(false);
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [showExitDialog, setShowExitDialog] = useState(false);
   const [status, setStatus] = useState<Array<{ path: string; status: string; added: number; removed: number }>>([]);
   const [diffs, setDiffs] = useState<Array<{ file: string; additions: number; deletions: number; before: string; after: string }>>([]);
   const [selectedDiff, setSelectedDiff] = useState<string | null>(null);
-
+  
   const refreshChanges = useCallback(async () => {
     if (!sessionID) return;
     setChangesLoading(true);
@@ -92,6 +116,31 @@ const BuilderHeader = ({
       setChangesLoading(false);
     }
   }, [lastAssistantMessageID, sessionID]);
+
+  const handleUndo = useCallback(async () => {
+    if (onUndo) {
+        onUndo();
+        return;
+    }
+    if (!sessionID || !lastAssistantMessageID) {
+      toast.error("No last message to revert");
+      return;
+    }
+    setChangesLoading(true);
+    try {
+      await OpenCode.revert(sessionID, { messageID: lastAssistantMessageID });
+      toast.success("Reverted last message");
+      // Trigger a refresh of the parent if needed, or just refresh local changes
+      await refreshChanges();
+      // Force page reload or session refresh to reflect state might be needed depending on how parent handles it
+      // Ideally onUndo callback handles the full refresh flow.
+      if (onRefreshSessions) onRefreshSessions();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to revert");
+    } finally {
+      setChangesLoading(false);
+    }
+  }, [lastAssistantMessageID, onRefreshSessions, onUndo, refreshChanges, sessionID]);
 
   const handleExportZip = useCallback(async () => {
     if (!directory) {
@@ -140,22 +189,113 @@ const BuilderHeader = ({
     }
   }, [directory]);
 
-  const revertLast = useCallback(async () => {
-    if (!sessionID || !lastAssistantMessageID) {
-      toast.error("No last message to revert");
+  const handleDeploy = useCallback(async () => {
+    if (!directory) {
+      toast.error("No active directory to deploy");
       return;
     }
-    setChangesLoading(true);
+    
+    setIsDeploying(true);
     try {
-      await OpenCode.revert(sessionID, { messageID: lastAssistantMessageID });
-      toast.success("Reverted last message");
-      await refreshChanges();
+        // Collect files same as export
+        const loadFilesRecursively = async (dir: string): Promise<Array<{ path: string; content: string }>> => {
+            const nodes = await OpenCode.listFiles(dir);
+            const files: Array<{ path: string; content: string }> = [];
+            
+            for (const node of nodes) {
+              if (node.name === "node_modules" || node.name === ".git" || node.name === "dist" || node.name === ".opencode") continue;
+              
+              if (node.type === "directory") {
+                const subFiles = await loadFilesRecursively(node.path);
+                files.push(...subFiles);
+              } else {
+                const file = await OpenCode.readFile(node.path).catch(() => null);
+                if (file && file.content) {
+                    files.push({ path: node.path, content: file.content });
+                }
+              }
+            }
+            return files;
+          };
+
+        const allFiles = await loadFilesRecursively(".");
+        const name = directory.split("/").pop() || "project";
+
+        const url = await deployToVercel({ name, files: allFiles });
+        toast.success(`Deployed to ${url}`);
+        window.open(url, "_blank");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to revert");
+        console.warn(err);
+        toast.error("Failed to deploy project");
     } finally {
-      setChangesLoading(false);
+        setIsDeploying(false);
     }
-  }, [lastAssistantMessageID, refreshChanges, sessionID]);
+  }, [directory]);
+
+  const handlePublish = useCallback(async () => {
+    if (!directory) {
+      toast.error("No active directory to publish");
+      return;
+    }
+
+    const token = window.prompt("Enter your GitHub Personal Access Token (repo scope required):");
+    if (!token) return;
+    
+    setIsPublishing(true);
+    try {
+        // Collect files same as export
+        const loadFilesRecursively = async (dir: string): Promise<Array<{ path: string; content: string }>> => {
+            const nodes = await OpenCode.listFiles(dir);
+            const files: Array<{ path: string; content: string }> = [];
+            
+            for (const node of nodes) {
+              if (node.name === "node_modules" || node.name === ".git" || node.name === "dist" || node.name === ".opencode") continue;
+              
+              if (node.type === "directory") {
+                const subFiles = await loadFilesRecursively(node.path);
+                files.push(...subFiles);
+              } else {
+                const file = await OpenCode.readFile(node.path).catch(() => null);
+                if (file && file.content) {
+                    files.push({ path: node.path, content: file.content });
+                }
+              }
+            }
+            return files;
+          };
+
+        const allFiles = await loadFilesRecursively(".");
+        const name = directory.split("/").pop() || "project";
+
+        const result = await publishToGitHub(token, name, allFiles);
+        if (result.success && result.repoUrl) {
+          toast.success(`Published to ${result.repoUrl}`);
+          window.open(result.repoUrl, "_blank");
+        } else {
+          throw new Error(result.error || "Failed to publish");
+        }
+    } catch (err) {
+        console.warn(err);
+        toast.error(err instanceof Error ? err.message : "Failed to publish project");
+    } finally {
+        setIsPublishing(false);
+    }
+  }, [directory]);
+
+  const handleBack = useCallback((e: React.MouseEvent) => {
+    if (isRunning) {
+      e.preventDefault();
+      setShowExitDialog(true);
+    } else {
+        navigate("/");
+    }
+  }, [isRunning, navigate]);
+
+  const confirmExit = useCallback(() => {
+    setShowExitDialog(false);
+    onStop();
+    navigate("/");
+  }, [navigate, onStop]);
 
   const sorted = useMemo(() => {
     return [...sessions].sort((a, b) => b.updated - a.updated);
@@ -164,10 +304,10 @@ const BuilderHeader = ({
   return (
     <header className="h-14 border-b border-border bg-card/50 backdrop-blur-xl flex items-center justify-between px-4">
       <div className="flex items-center gap-4">
-        <Link to="/" className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors">
+        <button onClick={handleBack} className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors appearance-none bg-transparent border-0 p-0 cursor-pointer text-base font-normal m-0">
           <ArrowLeft className="h-4 w-4" />
           <span className="text-sm">Back</span>
-        </Link>
+        </button>
         <div className="h-6 w-px bg-border" />
         <div className="flex items-center gap-2">
           <span className="h-6 w-6 flex items-center justify-center" role="img" aria-label="poop">
@@ -219,28 +359,103 @@ const BuilderHeader = ({
           </button>
         </div>
 
-
         <div className="flex items-center gap-2">
           {isRunning ? (
-            <Button variant="destructive" size="sm" className="gap-2" onClick={onStop}>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="gap-2"
+              onClick={() => {
+                toast.info("Loop stopped");
+                onStop();
+              }}
+            >
               <Square className="h-4 w-4" />
               <span className="hidden sm:inline">Stop</span>
             </Button>
           ) : (
-            <Button variant="glow" size="sm" className="gap-2" onClick={onRunLoop} disabled={!sessionID}>
-              <Play className="h-4 w-4" />
-              <span className="hidden sm:inline">Run Loop</span>
-            </Button>
+            <>
+              <Button
+                variant="glow"
+                size="sm"
+                className="gap-2"
+                onClick={() => {
+                  toast.info("Starting loop...");
+                  onRunLoop();
+                }}
+                disabled={!sessionID}
+              >
+                <Play className="h-4 w-4" />
+                <span className="hidden sm:inline">Run Loop</span>
+              </Button>
+
+              {onRunHeadless ? (
+                <DropdownMenu modal={false}>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-9 w-9"
+                      disabled={!sessionID}
+                      aria-label="Headless menu"
+                    >
+                      <ChevronDown className="h-4 w-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent>
+                    <DropdownMenuItem
+                      onClick={() => {
+                        toast.info("Starting headless loop...");
+                        onRunHeadless();
+                      }}
+                    >
+                      Run Headless (Exploration)
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : null}
+            </>
           )}
 
-          <Button variant="ghost" size="sm" className="gap-2" onClick={onApplyNextPatch} disabled={!sessionID || isRunning}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="gap-2"
+            onClick={onApplyNextPatch}
+            disabled={!sessionID || isRunning}
+          >
             <Wand2 className="h-4 w-4" />
             <span className="hidden sm:inline">Apply Next Patch</span>
           </Button>
 
-          <DropdownMenu>
+          <ComponentPicker
+            onSelect={(name) => {
+              // TODO: implement insertion logic or chat prompt
+              console.log("Selected component:", name);
+              toast.info(`Selected ${name} (insertion not implemented yet)`);
+            }}
+          />
+
+          <KeyboardShortcutsDialog />
+          <ThemeCustomizer />
+
+          {lastAssistantMessageID && !isRunning ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-2"
+              onClick={handleUndo}
+              disabled={changesLoading}
+              title="Undo last change"
+            >
+              <Undo2 className="h-4 w-4" />
+              <span className="hidden sm:inline">Undo</span>
+            </Button>
+          ) : null}
+
+          <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-9 w-9">
+              <Button variant="ghost" size="icon" className="h-9 w-9" aria-label="More actions">
                 <MoreHorizontal className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
@@ -262,6 +477,14 @@ const BuilderHeader = ({
               <DropdownMenuItem onClick={handleExportZip} disabled={isExporting || !directory}>
                 <Download className="h-4 w-4 mr-2" />
                 {isExporting ? "Exporting..." : "Export to ZIP"}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={handleDeploy} disabled={isDeploying || !directory}>
+                <CloudUpload className="h-4 w-4 mr-2" />
+                {isDeploying ? "Deploying..." : "Deploy to Vercel"}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={handlePublish} disabled={isPublishing || !directory}>
+                <CloudUpload className="h-4 w-4 mr-2" />
+                {isPublishing ? "Publishing..." : "Publish to GitHub"}
               </DropdownMenuItem>
               <DropdownMenuItem onClick={onResetSession}>
                 <RotateCcw className="h-4 w-4 mr-2" />
@@ -332,41 +555,18 @@ const BuilderHeader = ({
               Refresh
             </Button>
 
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="secondary" size="sm" className="gap-2">
-                  New Workspace
-                  <ChevronDown className="h-4 w-4 opacity-50" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-[200px]">
-                <DropdownMenuItem
-                  onClick={() => {
-                    onNewWorkspaceSession("blank");
-                    setOpen(false);
-                  }}
-                >
-                  <div className="flex flex-col">
-                    <span>Blank</span>
-                    <span className="text-xs text-muted-foreground">Minimal Node project</span>
-                  </div>
-                </DropdownMenuItem>
-                {TEMPLATES.map((t) => (
-                  <DropdownMenuItem
-                    key={t.id}
-                    onClick={() => {
-                      onNewWorkspaceSession(t.id);
-                      setOpen(false);
-                    }}
-                  >
-                    <div className="flex flex-col">
-                      <span>{t.label}</span>
-                      <span className="text-xs text-muted-foreground">{t.description}</span>
-                    </div>
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <Button 
+              variant="secondary" 
+              size="sm" 
+              className="gap-2"
+              onClick={() => {
+                setOpen(false);
+                setGalleryOpen(true);
+              }}
+            >
+              New Workspace
+              <ChevronDown className="h-4 w-4 opacity-50" />
+            </Button>
 
             <Button
               variant="glow"
@@ -425,32 +625,20 @@ const BuilderHeader = ({
             </div>
 
             {selectedDiff ? (
-              <div className="rounded-md border border-border bg-background">
-                <div className="flex items-center justify-between px-3 py-2 border-b border-border">
+              <div className="rounded-md border border-border bg-background mt-3">
+                <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-muted/30">
                   <div className="text-xs font-mono truncate">{selectedDiff}</div>
-                  <Button variant="ghost" size="sm" onClick={() => setSelectedDiff(null)}>
-                    Close
+                  <Button variant="ghost" size="sm" onClick={() => setSelectedDiff(null)} className="h-6 w-6 p-0">
+                    <span className="sr-only">Close</span>
+                    ×
                   </Button>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-0">
-                  {(() => {
+                {(() => {
                     const d = diffs.find((x) => x.file === selectedDiff);
-                    const before = d?.before ?? "";
-                    const after = d?.after ?? "";
                     return (
-                      <>
-                        <div className="border-b md:border-b-0 md:border-r border-border">
-                          <div className="px-3 py-2 text-xs text-muted-foreground">before</div>
-                          <pre className="px-3 pb-3 text-[11px] font-mono whitespace-pre-wrap max-h-[240px] overflow-auto">{before || "(empty)"}</pre>
-                        </div>
-                        <div>
-                          <div className="px-3 py-2 text-xs text-muted-foreground">after</div>
-                          <pre className="px-3 pb-3 text-[11px] font-mono whitespace-pre-wrap max-h-[240px] overflow-auto">{after || "(empty)"}</pre>
-                        </div>
-                      </>
+                        <DiffViewer before={d?.before || ""} after={d?.after || ""} className="border-0 rounded-none" />
                     );
-                  })()}
-                </div>
+                })()}
               </div>
             ) : null}
           </div>
@@ -460,12 +648,41 @@ const BuilderHeader = ({
               <RefreshCw className="h-4 w-4" />
               Refresh
             </Button>
-            <Button variant="destructive" size="sm" onClick={revertLast} disabled={changesLoading || !lastAssistantMessageID}>
+            {/* "Revert Last" inside the changes dialog is redundant with the main Undo button, 
+                but we keep it as a fallback or for consistency in that view. 
+                We can reuse handleUndo if we want consistent behavior.
+            */}
+            <Button variant="destructive" size="sm" onClick={handleUndo} disabled={changesLoading || !lastAssistantMessageID}>
               Revert Last
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={showExitDialog} onOpenChange={setShowExitDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Exit Builder?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The loop is currently running. Exiting now will stop the process.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmExit} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+              Stop & Exit
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <TemplateGallery 
+        open={galleryOpen} 
+        onOpenChange={setGalleryOpen} 
+        onSelect={(id) => {
+          onNewWorkspaceSession(id);
+          setGalleryOpen(false);
+        }}
+      />
     </header>
   );
 };

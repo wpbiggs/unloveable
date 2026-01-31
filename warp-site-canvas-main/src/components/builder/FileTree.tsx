@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { ChevronDown, ChevronRight, EyeOff, FileCode, FileJson, Folder, FolderOpen } from "lucide-react";
+import { ChevronDown, ChevronRight, EyeOff, FileCode, FileJson, Folder, FolderOpen, Search } from "lucide-react";
 import type { OpenCodeFileNode } from "@/lib/opencode-client";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 interface FileTreeProps {
   files: OpenCodeFileNode[];
@@ -123,12 +124,14 @@ const FileTreeNode = ({
 
 const FileTree = ({ files, selectedFile, onSelectFile, onExpandDir, getChildren }: FileTreeProps) => {
   const [showIgnored, setShowIgnored] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
 
-  const visible = showIgnored ? files : files.filter((n) => !n.ignored);
+  const visible = (showIgnored ? files : files.filter((n) => !n.ignored))
+    .filter(n => searchQuery ? n.name.toLowerCase().includes(searchQuery.toLowerCase()) : true);
 
   return (
     <div className="h-full flex flex-col bg-card/30">
-      <div className="h-10 border-b border-border flex items-center px-3">
+      <div className="h-auto border-b border-border flex flex-col gap-2 p-3">
         <div className="flex items-center justify-between w-full">
           <span className="text-xs font-medium text-muted-foreground">Files</span>
           <Button
@@ -140,6 +143,15 @@ const FileTree = ({ files, selectedFile, onSelectFile, onExpandDir, getChildren 
             <EyeOff className="h-3.5 w-3.5" />
             {showIgnored ? "Hide ignored" : "Show ignored"}
           </Button>
+        </div>
+        <div className="relative">
+          <Search className="absolute left-2 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
+          <Input
+            placeholder="Search files..."
+            className="h-8 pl-8 text-xs"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
         </div>
       </div>
       <ScrollArea className="flex-1">

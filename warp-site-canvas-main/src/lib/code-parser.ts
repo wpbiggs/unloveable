@@ -37,7 +37,7 @@ export function parseGeneratedCode(code: GeneratedCode): ParsedFiles {
   const js = jsBlocks.join("\n\n");
   
   // Create clean HTML without inline styles and scripts for display
-  let cleanHtml = html;
+  const cleanHtml = html;
   
   return { html: cleanHtml, css, js };
 }

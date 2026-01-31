@@ -1,5 +1,5 @@
 import { useMemo, useState, useRef, useEffect } from "react";
-import { Send, Sparkles, User, Activity, Paperclip, ImagePlus, X, Loader2 } from "lucide-react";
+import { Send, Sparkles, User, Activity, Paperclip, ImagePlus, X, Loader2, Copy, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Message } from "@/lib/ai-config";
@@ -8,6 +8,9 @@ import type { ConsoleLog } from "@/hooks/use-console-logs";
 import type { QuestionSpec } from "@/lib/question-extract";
 
 import { Progress } from "@/components/ui/progress";
+
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 function sanitizeAssistantText(text: string) {
   const src = (text || "").trim();
@@ -61,6 +64,7 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent, ac
   const [activityOpen, setActivityOpen] = useState(false);
   const [questionsOpen, setQuestionsOpen] = useState(false);
   const [answers, setAnswers] = useState<Array<{ id: string; answer: string }>>([]);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -75,6 +79,15 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent, ac
     return activity?.server?.feed ?? [];
   }, [activity?.server?.feed]);
 
+  const fmtTime = (ts: number) => {
+    if (!ts) return "";
+    try {
+      return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    } catch {
+      return "";
+    }
+  };
+
   const recentActivityInline = useMemo(() => {
     const logItems = recent.map((l) => ({
       id: l.id,
@@ -82,7 +95,7 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent, ac
       label: l.type,
       text: l.message,
     }));
-    const serverItems = server.map((e) => ({ id: e.id, ts: e.ts, label: "server", text: e.text }));
+    const serverItems = server.map((e) => ({ id: e.id, ts: e.ts, label: fmtTime(e.ts), text: e.text }));
     const merged = [...logItems, ...serverItems].sort((a, b) => a.ts - b.ts);
     const lastBeat = [...serverItems].reverse().find((e) => e.text.includes("[server] heartbeat") || e.text.includes("[sse]"));
     const tail = merged.slice(-6);
@@ -90,6 +103,10 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent, ac
     if (tail.some((x) => x.id === lastBeat.id)) return tail;
     return [...tail.slice(0, 5), lastBeat];
   }, [recent, server]);
+
+  const recentServerInline = useMemo(() => {
+    return server.slice(-10).map((e) => ({ id: e.id, ts: e.ts, label: fmtTime(e.ts), text: e.text }));
+  }, [server]);
 
   const recentInline = recentActivityInline;
 
@@ -110,6 +127,17 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent, ac
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const text = input.trim();
+
+    if (!text && files.length === 0) {
+      alert("Please enter a message or attach a file.");
+      return;
+    }
+
+    if (text.length > 100000) {
+      alert("Message is too long. Please shorten it (max 100,000 characters).");
+      return;
+    }
+
     if ((text || files.length) && !isGenerating) {
       onSendMessage({ content: text, files });
       setInput("");
@@ -166,6 +194,12 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent, ac
       e.preventDefault();
       handleSubmit(e);
     }
+  };
+
+  const handleCopy = (text: string, id: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
   };
 
   const suggestions = [
@@ -235,7 +269,7 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent, ac
               <div
                 key={message.id}
                 className={cn(
-                  "flex gap-3",
+                  "flex gap-3 group relative",
                   message.role === "user" ? "justify-end" : "justify-start"
                 )}
               >
@@ -246,7 +280,7 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent, ac
                 )}
                 <div
                   className={cn(
-                    "max-w-[85%] rounded-2xl px-4 py-2.5 text-sm",
+                    "max-w-[85%] rounded-2xl px-4 py-2.5 text-sm relative",
                     message.role === "user"
                       ? "bg-primary text-primary-foreground rounded-br-md"
                       : "bg-muted text-foreground rounded-bl-md"
@@ -254,7 +288,67 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent, ac
                 >
                   {message.role === "assistant" && message.content ? (
                     <div className="whitespace-pre-wrap">
-                      {sanitizeAssistantText(message.content)}
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          a: ({ node, children, ...props }) => (
+                            <a
+                              {...props}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-primary underline hover:text-primary/80"
+                            >
+                              {children}
+                            </a>
+                          ),
+                          p: ({ node, children, ...props }) => (
+                            <p {...props} className="mb-2 last:mb-0">
+                              {children}
+                            </p>
+                          ),
+                          ul: ({ node, children, ...props }) => (
+                            <ul {...props} className="list-disc pl-4 mb-2">
+                              {children}
+                            </ul>
+                          ),
+                          ol: ({ node, children, ...props }) => (
+                            <ol {...props} className="list-decimal pl-4 mb-2">
+                              {children}
+                            </ol>
+                          ),
+                          li: ({ node, children, ...props }) => (
+                            <li {...props} className="mb-1">
+                              {children}
+                            </li>
+                          ),
+                          code: ({ className, children }: { className?: string; children?: unknown }) => {
+                            const match = /language-(\w+)/.exec(className || "");
+                            const text = Array.isArray(children)
+                              ? children
+                                  .map((c) => (typeof c === "string" ? c : typeof c === "number" ? String(c) : ""))
+                                  .join("")
+                              : typeof children === "string"
+                                ? children
+                                : typeof children === "number"
+                                  ? String(children)
+                                  : "";
+
+                            return match ? (
+                              <code
+                                className={cn("block bg-muted p-2 rounded-md my-2 overflow-x-auto font-mono text-xs", className)}
+                              >
+                                {text}
+                              </code>
+                            ) : (
+                              <code className="bg-muted px-1.5 py-0.5 rounded font-mono text-xs">
+                                {text}
+                              </code>
+                            );
+                          },
+                        }}
+                      >
+                        {sanitizeAssistantText(message.content)}
+                      </ReactMarkdown>
                       {message.attachments?.length ? (
                         <div className="mt-3 space-y-2">
                           {message.attachments.map((a, idx) => {
@@ -345,6 +439,22 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent, ac
                       ) : null}
                     </div>
                   )}
+                  <div className="mt-1 flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <span className="text-[10px] opacity-70">
+                      {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                    <button
+                      onClick={() => handleCopy(message.content || "", message.id)}
+                      className="p-1 hover:bg-black/10 rounded transition-colors"
+                      title="Copy message"
+                    >
+                      {copiedId === message.id ? (
+                        <Check className="h-3 w-3" />
+                      ) : (
+                        <Copy className="h-3 w-3" />
+                      )}
+                    </button>
+                  </div>
                 </div>
                 {message.role === "user" && (
                   <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center shrink-0">
@@ -384,9 +494,15 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent, ac
               <div className="text-xs text-muted-foreground">{activity.loopState} • iter {activity.iteration}</div>
             </div>
             <div className="mt-2 space-y-1">
-              {recentInline.length ? (
+              {recentServerInline.length ? (
+                recentServerInline.map((l) => (
+                  <div key={l.id} className="text-[11px] font-mono text-foreground/90 whitespace-pre-wrap">
+                    <span className="text-muted-foreground">[{l.label || ""}]</span> {l.text}
+                  </div>
+                ))
+              ) : recentInline.length ? (
                 recentInline.map((l) => (
-                  <div key={l.id} className="text-[11px] font-mono text-foreground/90 truncate">
+                  <div key={l.id} className="text-[11px] font-mono text-foreground/90 whitespace-pre-wrap">
                     <span className="text-muted-foreground">[{l.label}]</span> {l.text}
                   </div>
                 ))
@@ -536,8 +652,8 @@ const ChatPanel = ({ messages, onSendMessage, isGenerating, streamingContent, ac
               <div className="rounded-md border border-border bg-background max-h-[20vh] overflow-auto">
                 <div className="p-3 space-y-1">
                   {server.slice(-40).map((e) => (
-                    <div key={e.id} className="text-[11px] font-mono text-foreground/90">
-                      {e.text}
+                    <div key={e.id} className="text-[11px] font-mono text-foreground/90 whitespace-pre-wrap">
+                      <span className="text-muted-foreground">[{fmtTime(e.ts)}]</span> {e.text}
                     </div>
                   ))}
                 </div>

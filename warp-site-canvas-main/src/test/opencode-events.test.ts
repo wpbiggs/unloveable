@@ -3,16 +3,25 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { openOpenCodeEvents } from '../lib/opencode-events';
 
 // Mock EventSource
+type EventSourceLike = {
+  url?: string;
+  close: () => void;
+  onmessage: ((ev: MessageEvent) => void) | null;
+  onopen: ((ev: Event) => void) | null;
+  onerror: ((ev: Event) => void) | null;
+};
+
 const EventSourceMock = vi.fn(function(url: string) {
-  return {
+  const instance: EventSourceLike = {
     url,
     close: vi.fn(),
-    onmessage: null as any,
-    onopen: null as any,
-    onerror: null as any,
+    onmessage: null,
+    onopen: null,
+    onerror: null,
   };
+  return instance;
 });
-globalThis.EventSource = EventSourceMock as any;
+globalThis.EventSource = EventSourceMock as unknown as typeof EventSource;
 
 describe('openOpenCodeEvents', () => {
   afterEach(() => {
@@ -32,7 +41,7 @@ describe('openOpenCodeEvents', () => {
   });
 
   it('should parse and emit valid JSON events', () => {
-    let capturedInstance: any;
+    let capturedInstance: EventSourceLike | null = null;
     EventSourceMock.mockImplementation(function() {
       capturedInstance = {
         close: vi.fn(),
@@ -55,13 +64,13 @@ describe('openOpenCodeEvents', () => {
     };
     
     // Simulate async message arrival
-    capturedInstance.onmessage(new MessageEvent('message', { data: JSON.stringify(mockEvent) }));
+    capturedInstance?.onmessage?.(new MessageEvent('message', { data: JSON.stringify(mockEvent) }));
 
     expect(onEvent).toHaveBeenCalledWith(mockEvent);
   });
 
   it('should unwrap wrapped payloads', () => {
-    let capturedInstance: any;
+    let capturedInstance: EventSourceLike | null = null;
     EventSourceMock.mockImplementation(function() {
       capturedInstance = {
         close: vi.fn(),
@@ -82,13 +91,13 @@ describe('openOpenCodeEvents', () => {
         properties: { baz: 'qux' }
       }
     };
-    capturedInstance.onmessage(new MessageEvent('message', { data: JSON.stringify(mockEvent) }));
+    capturedInstance?.onmessage?.(new MessageEvent('message', { data: JSON.stringify(mockEvent) }));
 
     expect(onEvent).toHaveBeenCalledWith(mockEvent.payload);
   });
 
   it('should ignore invalid JSON', () => {
-    let capturedInstance: any;
+    let capturedInstance: EventSourceLike | null = null;
     EventSourceMock.mockImplementation(function() {
       capturedInstance = {
         close: vi.fn(),
@@ -102,7 +111,7 @@ describe('openOpenCodeEvents', () => {
     const onEvent = vi.fn();
     openOpenCodeEvents(onEvent);
 
-    capturedInstance.onmessage(new MessageEvent('message', { data: 'invalid-json' }));
+    capturedInstance?.onmessage?.(new MessageEvent('message', { data: 'invalid-json' }));
 
     expect(onEvent).not.toHaveBeenCalled();
   });

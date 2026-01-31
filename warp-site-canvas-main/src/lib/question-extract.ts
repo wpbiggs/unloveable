@@ -20,25 +20,27 @@ function parseQuestionObject(obj: unknown) {
   const root = obj as Record<string, unknown>;
   const raw =
     (Array.isArray(root.questions) && root.questions) ||
-    (Array.isArray((root as any).clarifications) && (root as any).clarifications) ||
-    (Array.isArray((root as any).unloveable_questions) && (root as any).unloveable_questions);
+    (Array.isArray(root["clarifications"]) && root["clarifications"]) ||
+    (Array.isArray(root["unloveable_questions"]) && root["unloveable_questions"]);
 
   if (!Array.isArray(raw)) return [];
 
   const items: QuestionSpec[] = [];
   for (let i = 0; i < raw.length; i++) {
-    const q = raw[i] as any;
+    const q = raw[i];
     if (!q || typeof q !== "object") continue;
-    const idRaw = typeof q.id === "string" ? q.id.trim() : "";
+    const qobj = q as Record<string, unknown>;
+
+    const idRaw = typeof qobj.id === "string" ? qobj.id.trim() : "";
     const id = idRaw || `q${i + 1}`;
-    const question = typeof q.question === "string" ? q.question.trim() : "";
+    const question = typeof qobj.question === "string" ? qobj.question.trim() : "";
     const type = ((): QuestionSpec["type"] => {
-      const t = typeof q.type === "string" ? q.type : "text";
+      const t = typeof qobj.type === "string" ? qobj.type : "text";
       if (t === "select" || t === "boolean" || t === "text") return t;
       return "text";
     })();
-    const options = Array.isArray(q.options) ? q.options.filter((x: unknown) => typeof x === "string") : undefined;
-    const required = typeof q.required === "boolean" ? q.required : true;
+    const options = Array.isArray(qobj.options) ? qobj.options.filter((x: unknown) => typeof x === "string") : undefined;
+    const required = typeof qobj.required === "boolean" ? qobj.required : true;
     if (!question || !question.endsWith("?")) continue;
 
     // Prefer stable snake_case ids; ignore invalid ids from model.

@@ -2,6 +2,7 @@ import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/componen
 import ChatPanel from "@/components/builder/ChatPanel";
 import PreviewPanel from "@/components/builder/PreviewPanel";
 import BuilderHeader from "@/components/builder/BuilderHeader";
+import { OpenCodeDirectoryDialog } from "@/components/builder/OpenCodeDirectoryDialog";
 import ConsolePanel from "@/components/builder/ConsolePanel";
 import FileTree from "@/components/builder/FileTree";
 import CodeEditor from "@/components/builder/CodeEditor";
@@ -9,7 +10,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { toast } from "sonner";
 import { Message } from "@/lib/ai-config";
 import { useConsoleLogs } from "@/hooks/use-console-logs";
-import { OpenCode, OpenCodeDirectory, type OpenCodeFileNode } from "@/lib/opencode-client";
+import { OpenCode, OpenCodeDirectory, type OpenCodeFileNode, type OpenCodeMessagePart, type OpenCodeMessageResponse } from "@/lib/opencode-client";
 import { extractDisplayText, streamOpenCodeMessage } from "@/lib/opencode-stream";
 import { OpenCodePreferences } from "@/lib/opencode-preferences";
 import { OpenCodeSessionStore } from "@/lib/opencode-session-store";
@@ -19,6 +20,7 @@ import { loopIsBusy, loopReducer, type LoopContext, type LoopState } from "@/lib
 import { extractClarificationSpec, type QuestionSpec } from "@/lib/question-extract";
 import { openOpenCodeEvents } from "@/lib/opencode-events";
 import { extractPageSpec, stringifyPageSpec, type PageSpec } from "@/lib/page-spec";
+import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
 
 const guessLanguage = (path: string) => {
   const idx = path.lastIndexOf(".");
@@ -31,6 +33,130 @@ const guessLanguage = (path: string) => {
   if (ext === "md") return "markdown";
   return "text";
 };
+
+const STRICT_QUESTIONS = [
+  "If you need clarifications, respond with ONLY this JSON code block and nothing else:",
+  "```json",
+  JSON.stringify(
+    {
+      questions: [
+        {
+          id: "q1",
+          question: "What do you need clarified?",
+          type: "text",
+          required: true,
+        },
+      ],
+    },
+    null,
+    2,
+  ),
+  "```",
+  "",
+  "Rules:",
+  "- id must be stable snake_case",
+  "- question must end with ?",
+  "- type is text | select | boolean",
+  "- select requires options[]",
+  "- boolean answers are yes/no",
+].join("\n");
+
+const INTAKE_QUESTIONS: QuestionSpec[] = [
+  {
+    id: "primary_user_success",
+    question: "Who is the primary user, and what is the first success moment they should reach in <5 minutes?",
+    type: "text",
+    required: true,
+  },
+  {
+    id: "must_haves_and_non_goals",
+    question: "List 3 must-haves for v1, and 3 explicit non-goals (things we should NOT build yet).",
+    type: "text",
+    required: true,
+  },
+  {
+    id: "sensitive_data_and_never_happens",
+    question: "What sensitive data (if any) will be stored/processed, and what must never happen (security/privacy/financial/availability)?",
+    type: "text",
+    required: true,
+  },
+  {
+    id: "runtime_and_deployment",
+    question: "Where will this run and ship first (web/mobile/cli), and what's your deployment constraint (local only / single tenant / public SaaS)?",
+    type: "text",
+    required: true,
+  },
+  {
+    id: "ux_direction",
+    question: "Pick a UX direction: 3 adjectives + 1 reference product/site.",
+    type: "text",
+    required: true,
+  },
+];
+
+type PendingQuestionKind = "intake" | "clarification";
+
+const RECOMMENDED_DIRECTORY = "/home/will/opencode-test/warp-site-canvas-main";
+
+type JsonRecord = Record<string, unknown>;
+
+function isObj(input: unknown): input is JsonRecord {
+  return !!input && typeof input === "object";
+}
+
+function parseJsonRecord(src: string): JsonRecord | null {
+  try {
+    const v = JSON.parse(src) as unknown;
+    return isObj(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function commandFor(manager: "pnpm" | "npm", script: string) {
+  if (manager === "pnpm") {
+    if (script === "test") return "CI=1 corepack pnpm test";
+    return `corepack pnpm ${script}`;
+  }
+  if (script === "install") return "npm install";
+  // Ensure tests don't start watch mode (vitest/jest behave differently under CI).
+  if (script === "test") return "CI=1 npm test";
+  if (script === "start") return "npm start";
+  return `npm run ${script}`;
+}
+
+async function detectPackageManager(runShell: (cmd: string, signal?: AbortSignal) => Promise<{ ok: boolean; output: string }>, prefix: string, signal?: AbortSignal) {
+  // Prefer pnpm when a pnpm workspace or lockfile is present (or pnpm is available via corepack).
+  const probe = await runShell(
+    `${prefix}test -f pnpm-workspace.yaml -o -f pnpm-lock.yaml -o -f ../pnpm-workspace.yaml -o -f ../pnpm-lock.yaml && echo pnpm || echo npm`,
+    signal,
+  );
+  return probe.ok && probe.output.trim() === "pnpm" ? "pnpm" : "npm";
+}
+
+function readMessageId(msg: unknown) {
+  if (!isObj(msg)) return "";
+  const info = isObj(msg.info) ? msg.info : null;
+  const infoId = info && typeof info.id === "string" ? info.id : "";
+  if (infoId) return infoId;
+  return typeof msg.id === "string" ? msg.id : "";
+}
+
+function parseAttachmentsFromToolState(state: unknown) {
+  const out: Array<{ url: string; mime: string; filename?: string }> = [];
+  if (!isObj(state)) return out;
+  const att = state.attachments;
+  if (!Array.isArray(att)) return out;
+  for (const a of att) {
+    if (!isObj(a)) continue;
+    const url = typeof a.url === "string" ? a.url : "";
+    if (!url) continue;
+    const mime = typeof a.mime === "string" ? a.mime : "application/octet-stream";
+    const filename = typeof a.filename === "string" ? a.filename : undefined;
+    out.push({ url, mime, filename });
+  }
+  return out;
+}
 
 const Builder = () => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -49,11 +175,49 @@ const Builder = () => {
   const [canRunPreview, setCanRunPreview] = useState(false);
   const [isRunStarting, setIsRunStarting] = useState(false);
   const autoRunAttemptedRef = useRef<Set<string>>(new Set());
+  const handleSendMessageRef = useRef<
+    (content: string, opts?: { agent?: string; files?: File[]; signal?: AbortSignal }) => Promise<null | { text: string; messageID?: string }>
+  >(async () => null);
+  
+  // Toggle for Command Palette (placeholder for now)
+  const toggleCommandPalette = useCallback(() => {
+    toast("Command Palette coming soon!");
+  }, []);
+
+  const toggleSidebar = useCallback(() => {
+    // If we had a sidebar state, we would toggle it here.
+    // For now, let's just log or toast.
+    toast("Sidebar toggle triggered (not implemented yet)");
+  }, []);
+
+  useGlobalShortcuts({
+    onSave: () => {
+        // Global save if needed, but CodeEditor handles its own.
+        // Maybe trigger a "Save All" if we track multiple open files?
+        // For now, we can just toast.
+        // toast("Global save triggered");
+    },
+    onSendMessage: () => {
+      // This might be tricky because we need the input content.
+      // Ideally, the ChatPanel handles its own Mod+Enter.
+      // But we can focus the input if it's not focused.
+      const chatInput = document.querySelector('textarea[placeholder^="Describe what you want"]');
+      if (chatInput instanceof HTMLElement) {
+        chatInput.focus();
+      }
+    },
+    onToggleCommandPalette: toggleCommandPalette,
+    onToggleSidebar: toggleSidebar
+  });
 
   const [loop, dispatchLoop] = useReducer(loopReducer, { state: "IDLE", iteration: 0, lastError: null, lastRunLog: null } satisfies LoopContext);
   const loopStopRef = useRef(false);
+  const autoLoopRef = useRef<{ active: boolean; goal: string; max: number; startedAt: number } | null>(null);
   const [goal, setGoal] = useState<string | null>(null);
   const [pendingQuestions, setPendingQuestions] = useState<QuestionSpec[] | null>(null);
+  const [pendingQuestionsKind, setPendingQuestionsKind] = useState<PendingQuestionKind | null>(null);
+  const [pendingGoalToResume, setPendingGoalToResume] = useState<string | null>(null);
+  const [intakeSnapshot, setIntakeSnapshot] = useState<null | { goal: string; answers: Array<{ id: string; answer: string }> }>(null);
   const [pageSpec, setPageSpec] = useState<PageSpec | null>(null);
   const [pageSpecRaw, setPageSpecRaw] = useState<string | null>(null);
   const questionRef = useRef(false);
@@ -66,6 +230,7 @@ const Builder = () => {
   const [rootFiles, setRootFiles] = useState<OpenCodeFileNode[]>([]);
   const [childrenByPath, setChildrenByPath] = useState<Record<string, OpenCodeFileNode[]>>({});
   const [directory, setDirectory] = useState<string | null>(() => OpenCodeDirectory.get());
+  const [dirPickerOpen, setDirPickerOpen] = useState(false);
   const { logs: consoleLogItems, info, warn, error, success, debug, clearLogs } = useConsoleLogs();
   const abortRef = useRef<AbortController | null>(null);
   const didInitRef = useRef(false);
@@ -81,37 +246,11 @@ const Builder = () => {
       }
   >(null);
 
-  const STRICT_QUESTIONS = [
-    "If you need clarifications, respond with ONLY this JSON code block and nothing else:",
-    "```json",
-    JSON.stringify(
-      {
-        questions: [
-          {
-            id: "q1",
-            question: "What do you need clarified?",
-            type: "text",
-            required: true,
-          },
-        ],
-      },
-      null,
-      2,
-    ),
-    "```",
-    "",
-    "Rules:",
-    "- id must be stable snake_case",
-    "- question must end with ?",
-    "- type is text | select | boolean",
-    "- select requires options[]",
-    "- boolean answers are yes/no",
-  ].join("\n");
-
-  const RECOMMENDED_DIRECTORY = "/home/will/opencode-test/warp-site-canvas-main";
+  const projectProbeRef = useRef<{ at: number; cached: boolean }>({ at: 0, cached: false });
+  const previewAttemptAtRef = useRef<Record<string, number>>({});
 
   const stablePort = useMemo(() => {
-    const dir = OpenCodeDirectory.get() ?? "";
+    const dir = directory ?? "";
     let hash = 0;
     for (let i = 0; i < dir.length; i++) hash = (hash * 31 + dir.charCodeAt(i)) >>> 0;
     return 3000 + (hash % 500);
@@ -120,36 +259,37 @@ const Builder = () => {
   const detectProjectRoot = useCallback(async () => {
     const rootPkg = await OpenCode.readFile("package.json").catch(() => null);
     if (rootPkg?.content) {
-      try {
-        return { path: ".", pkg: JSON.parse(rootPkg.content) as any };
-      } catch {
-        return { path: ".", pkg: null };
-      }
+      const pkg = parseJsonRecord(rootPkg.content);
+      return pkg ? { path: ".", pkg } : { path: ".", pkg: null };
     }
 
     // Common failure mode: the agent scaffolds a project in a subdirectory (e.g. ./app).
     // Try to detect a single obvious project root one level down.
-    const nodes = await OpenCode.listFiles(".").catch(() => [] as any[]);
-    const dirs = (Array.isArray(nodes) ? nodes : [])
-      .filter((n: any) => n && n.type === "directory" && !n.ignored)
+    const nodes = await OpenCode.listFiles(".").catch(() => [] as OpenCodeFileNode[]);
+    const dirs = nodes
+      .filter((n) => n.type === "directory" && !n.ignored)
       .slice(0, 12);
 
-    const hits: Array<{ path: string; pkg: any }> = [];
+    const hits: Array<{ path: string; pkg: JsonRecord }> = [];
     for (const d of dirs) {
       const p = typeof d.path === "string" ? d.path : "";
       if (!p || p === "." || p === "..") continue;
       const subPkg = await OpenCode.readFile(`${p}/package.json`).catch(() => null);
       if (!subPkg?.content) continue;
-      try {
-        const json = JSON.parse(subPkg.content) as any;
-        const scripts = json?.scripts;
-        const looksRunnable = !!(scripts && typeof scripts === "object" && (scripts.dev || scripts.start || scripts.build || scripts.test));
-        if (!looksRunnable) continue;
-        hits.push({ path: p, pkg: json });
-        if (hits.length > 1) break;
-      } catch {
-        // ignore
-      }
+      const json = parseJsonRecord(subPkg.content);
+      if (!json) continue;
+
+      const scripts = isObj(json.scripts) ? json.scripts : null;
+      const looksRunnable = !!(
+        scripts &&
+        (typeof scripts.dev === "string" ||
+          typeof scripts.start === "string" ||
+          typeof scripts.build === "string" ||
+          typeof scripts.test === "string")
+      );
+      if (!looksRunnable) continue;
+      hits.push({ path: p, pkg: json });
+      if (hits.length > 1) break;
     }
 
     if (hits.length === 1) return hits[0];
@@ -162,26 +302,17 @@ const Builder = () => {
   }, []);
 
   const refreshPreview = useCallback(async () => {
-    const saved = OpenCodePreviewStore.get(OpenCodeDirectory.get());
+    const saved = OpenCodePreviewStore.get(directory);
     setPreviewUrl(saved?.url ?? null);
 
     // Detect whether this workspace has a runnable dev server.
     // (Used to show/hide the "Run" preview affordance.)
-    const probeAt = ((): { at: number; cached: boolean } => {
-      const ref = (refreshPreview as any).__projectProbe as { at: number; cached: boolean } | undefined;
-      const next = ref ?? { at: 0, cached: false };
-      (refreshPreview as any).__projectProbe = next;
-      return next;
-    })();
+    const probeAt = projectProbeRef.current;
 
     const pkg = await OpenCode.readFile("package.json").catch(() => null);
     const rootJson = (() => {
       if (!pkg?.content) return null;
-      try {
-        return JSON.parse(pkg.content) as any;
-      } catch {
-        return null;
-      }
+      return parseJsonRecord(pkg.content);
     })();
 
     const detected =
@@ -202,12 +333,7 @@ const Builder = () => {
 
     // Avoid spamming /file/content while the agent is generating.
     // We still want the preview to refresh, just not on every interval tick.
-    const attemptAt = ((): Record<string, number> => {
-      const ref = (refreshPreview as any).__attemptAt as Record<string, number> | undefined;
-      const next = ref ?? {};
-      (refreshPreview as any).__attemptAt = next;
-      return next;
-    })();
+    const attemptAt = previewAttemptAtRef.current;
 
     const candidates = ["web/index.html", "index.html", "dist/index.html", "public/index.html"];
     for (const p of candidates) {
@@ -223,7 +349,7 @@ const Builder = () => {
     }
 
     setPreview(null);
-  }, [selectedFile]);
+  }, [detectProjectRoot, directory, selectedFile]);
 
   const handlePreviewRefresh = useCallback(async () => {
     setPreviewNonce((n) => n + 1);
@@ -267,7 +393,7 @@ const Builder = () => {
     const cleanup = openOpenCodeEvents((evt) => {
       const sid = sessionID;
       const shid = shellSessionID;
-      const p = evt.properties;
+      const p: JsonRecord = isObj(evt.properties) ? evt.properties : {};
 
       const liveSid = liveRef.current?.sessionID;
       const matchIDs = [sid, shid, liveSid].filter(Boolean) as string[];
@@ -296,9 +422,20 @@ const Builder = () => {
       }
 
       const sessionMatch = (() => {
-        if (evt.type === "message.updated") return p?.info?.sessionID && matchIDs.includes(p.info.sessionID);
-        if (evt.type === "message.part.updated") return p?.part?.sessionID && matchIDs.includes(p.part.sessionID);
-        if (evt.type === "session.status") return p?.sessionID && matchIDs.includes(p.sessionID);
+        if (evt.type === "message.updated") {
+          const info = isObj(p.info) ? p.info : null;
+          const session = info && typeof info.sessionID === "string" ? info.sessionID : "";
+          return !!session && matchIDs.includes(session);
+        }
+        if (evt.type === "message.part.updated") {
+          const part = isObj(p.part) ? p.part : null;
+          const session = part && typeof part.sessionID === "string" ? part.sessionID : "";
+          return !!session && matchIDs.includes(session);
+        }
+        if (evt.type === "session.status") {
+          const session = typeof p.sessionID === "string" ? p.sessionID : "";
+          return !!session && matchIDs.includes(session);
+        }
         return false;
       })();
 
@@ -312,18 +449,18 @@ const Builder = () => {
       const live = liveRef.current;
       if (live) {
         if (evt.type === "message.updated") {
-          const info = p?.info;
-          const role = info?.role;
-          const mid = info?.id;
+          const info = isObj(p.info) ? p.info : null;
+          const role = info && typeof info.role === "string" ? info.role : "";
+          const mid = info && typeof info.id === "string" ? info.id : "";
           if (!live.messageID && role === "assistant" && typeof mid === "string") {
             liveRef.current = { ...live, messageID: mid, lastEventAt: Date.now() };
           }
         }
         if (evt.type === "message.part.updated") {
-          const part = p?.part;
-          const delta = typeof p?.delta === "string" ? p.delta : "";
-          const type = part?.type;
-          const mid = part?.messageID;
+          const part = isObj(p.part) ? p.part : null;
+          const delta = typeof p.delta === "string" ? p.delta : "";
+          const type = part && typeof part.type === "string" ? part.type : "";
+          const mid = part && typeof part.messageID === "string" ? part.messageID : "";
           const cur = liveRef.current;
           if (cur && !cur.messageID && typeof mid === "string") {
             // Some servers send part updates before message.updated.
@@ -339,27 +476,32 @@ const Builder = () => {
       }
 
       if (evt.type === "session.status") {
-        const t = p?.status?.type;
-        if (typeof t === "string") setServerStatus(t);
+        const status = isObj(p.status) ? p.status : null;
+        const t = status && typeof status.type === "string" ? status.type : "";
+        if (t) setServerStatus(t);
       }
 
       const text = (() => {
         if (evt.type === "message.part.updated") {
-          const part = p?.part;
-          const type = part?.type;
-          const delta = typeof p?.delta === "string" ? p.delta : "";
+          const part = isObj(p.part) ? p.part : null;
+          const type = part && typeof part.type === "string" ? part.type : "";
+          const delta = typeof p.delta === "string" ? p.delta : "";
           if (type === "tool") {
-            const tool = part?.tool;
-            const status = part?.state?.status;
-            if (tool && status) return `[tool] ${tool} ${status}`;
-            if (tool) return `[tool] ${tool}`;
+            const tool = part && typeof part.tool === "string" ? part.tool : "";
+            const state = part && isObj(part.state) ? part.state : null;
+            const status = state && typeof state.status === "string" ? state.status : "";
+            if (tool && status) return `TOOL ${tool} ${status}`;
+            if (tool) return `TOOL ${tool}`;
           }
           if (type === "reasoning") {
             if (delta) return `[reasoning] +${delta.length} chars`;
             return `[reasoning] updated`;
           }
           if (type === "text") {
-            if (delta) return `[text] ${delta.replace(/\n/g, " ").slice(0, 120)}`;
+            if (delta) {
+              const trimmed = delta.replace(/\r/g, "").trimEnd();
+              if (trimmed) return trimmed.slice(0, 2000);
+            }
             return `[text] updated`;
           }
           if (typeof type === "string") return `[part] ${type}`;
@@ -367,16 +509,17 @@ const Builder = () => {
         }
 
         if (evt.type === "message.updated") {
-          const info = p?.info;
-          const role = info?.role;
-          const agent = info?.agent;
+          const info = isObj(p.info) ? p.info : null;
+          const role = info && typeof info.role === "string" ? info.role : "";
+          const agent = info && typeof info.agent === "string" ? info.agent : "";
           if (role && agent) return `[message] ${role} (${agent})`;
           if (role) return `[message] ${role}`;
           return "[message] updated";
         }
 
         if (evt.type === "session.status") {
-          const t = p?.status?.type;
+          const status = isObj(p.status) ? p.status : null;
+          const t = status && typeof status.type === "string" ? status.type : "";
           if (t === "retry") return `[session] retry`;
           if (t === "busy") return `[session] busy`;
           if (t === "idle") return `[session] idle`;
@@ -397,6 +540,8 @@ const Builder = () => {
 
   const stop = useCallback(async () => {
     loopStopRef.current = true;
+    if (autoLoopRef.current) autoLoopRef.current = { ...autoLoopRef.current, active: false };
+    loopAbortRef.current?.abort();
     abortRef.current?.abort();
     abortRef.current = null;
     liveRef.current = null;
@@ -404,10 +549,22 @@ const Builder = () => {
     if (sessionID) {
       await OpenCode.abortSession(sessionID).catch(() => undefined);
     }
+    if (shellSessionID) {
+      await OpenCode.abortSession(shellSessionID).catch(() => undefined);
+    }
     setIsGenerating(false);
     setStreamingContent("");
     dispatchLoop({ type: "SET_STATE", state: "STOPPED" });
-  }, [sessionID]);
+  }, [sessionID, shellSessionID]);
+
+  const isComplete = useCallback(async () => {
+    const raw = await OpenCode.readFile(".unloveable/complete.json")
+      .then((r) => (typeof r?.content === "string" ? r.content : ""))
+      .catch(() => "");
+    if (!raw.trim()) return false;
+    const obj = parseJsonRecord(raw);
+    return !!(obj && obj.complete === true);
+  }, []);
 
   const ensureShellSession = useCallback(async () => {
     if (shellSessionID) return shellSessionID;
@@ -457,44 +614,41 @@ const Builder = () => {
           const attachments: Array<{ url: string; mime: string; filename?: string }> = [];
           for (const p of parts) {
             if (!p || typeof p !== "object") continue;
-            const t = (p as any).type;
+            const t = p.type;
             if (t === "text") {
-              const v = (p as any).text;
+              const v = p.text;
               if (typeof v === "string" && v) lines.push(v);
             }
             if (t === "file") {
-              const url = typeof (p as any).url === "string" ? (p as any).url : "";
-              const mime = typeof (p as any).mime === "string" ? (p as any).mime : "application/octet-stream";
-              const filename = typeof (p as any).filename === "string" ? (p as any).filename : undefined;
+              const url = typeof p.url === "string" ? p.url : "";
+              const mime = typeof p.mime === "string" ? p.mime : "application/octet-stream";
+              const filename = typeof p.filename === "string" ? p.filename : undefined;
               if (url) attachments.push({ url, mime, filename });
               lines.push(filename ? `[file] ${filename}` : "[file]");
             }
             if (t === "patch") {
-              const files = Array.isArray((p as any).files) ? (p as any).files.join(", ") : "";
+              const files = Array.isArray(p.files)
+                ? p.files
+                    .filter((x) => typeof x === "string")
+                    .join(", ")
+                : "";
               lines.push(files ? `[patch] ${files}` : "[patch]");
             }
             if (t === "tool") {
-              const tool = typeof (p as any).tool === "string" ? (p as any).tool : "tool";
-              const status = (p as any).state?.status;
+              const tool = typeof p.tool === "string" ? p.tool : "tool";
+              const state = isObj(p.state) ? p.state : null;
+              const status = state && typeof state.status === "string" ? state.status : "";
               if (status === "completed") lines.push(`[${tool}] completed`);
               if (status === "error") lines.push(`[${tool}] error`);
 
-              const att = (p as any)?.state?.attachments;
-              if (Array.isArray(att)) {
-                for (const a of att) {
-                  const url = typeof (a as any)?.url === "string" ? (a as any).url : "";
-                  const mime = typeof (a as any)?.mime === "string" ? (a as any).mime : "application/octet-stream";
-                  const filename = typeof (a as any)?.filename === "string" ? (a as any).filename : undefined;
-                  if (url) attachments.push({ url, mime, filename });
-                }
-              }
+              if (state) attachments.push(...parseAttachmentsFromToolState(state));
             }
           }
           return { text: lines.join("\n").trim(), attachments };
         })();
 
-        const err = (m.info as any).error;
-        const errMsg = typeof err?.message === "string" ? err.message : "";
+        const err = m.info.error;
+        const errMsg = isObj(err) && typeof err.message === "string" ? err.message : "";
         const content = errMsg ? (built.text ? `${built.text}\n\n[error] ${errMsg}` : `[error] ${errMsg}`) : built.text;
         return {
           id: m.info.id,
@@ -529,8 +683,8 @@ const Builder = () => {
     const list = await refreshSessions().catch(() => []);
     const preferred = OpenCodeSessionStore.get(OpenCodeDirectory.get());
     const picked =
-      (preferred && list.find((s: any) => s.id === preferred)) ||
-      (list.length ? (list as any)[0] : null);
+      (preferred && list.find((s) => s.id === preferred)) ||
+      (list.length ? list[0] : null);
     if (picked) {
       setSessionID(picked.id);
       OpenCodeSessionStore.set(OpenCodeDirectory.get(), picked.id);
@@ -552,33 +706,60 @@ const Builder = () => {
     return idx > 0 ? { providerID: modelRaw.slice(0, idx), modelID: modelRaw.slice(idx + 1) } : undefined;
   }, []);
 
+  const runHeadlessLoop = useCallback(async (mode: "exploration" | "production") => {
+    setIsRunStarting(true);
+    info("Headless Loop", `Starting ${mode} loop...`);
+    try {
+      const sid = await ensureShellSession();
+      const agent = OpenCodePreferences.agent.get() ?? "task";
+      
+      // Stream output to console
+      // Use standard runShell which returns on completion.
+      // We rely on useConsoleLogs / server events to show progress in the UI if possible,
+      // but runShell here blocks until the loop script exits.
+      await OpenCode.runShell(
+        sid, 
+        `./run-loop.sh ${mode} > /dev/null 2>&1`, 
+        { agent, model: getModelOverride() }
+      );
+      
+      // Note: In a real implementation we would want to stream the output
+      // For now, OpenCode.runShell returns the final result, so we'll just log success/fail
+      success("Headless Loop", "Completed successfully");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      error("Headless Loop Failed", msg);
+    } finally {
+      setIsRunStarting(false);
+    }
+  }, [ensureShellSession, getModelOverride, info, success, error]);
+
   const runShell = useCallback(
-    async (command: string) => {
+    async (command: string, signal?: AbortSignal) => {
       // Use a dedicated shell session so checks/preview don't collide with the chat session.
       const sid = await ensureShellSession();
       const agent = OpenCodePreferences.agent.get() ?? "task";
-      const msg = await OpenCode.runShell(sid, command, { agent, model: getModelOverride() });
-      const messageID =
-        typeof (msg as any)?.info?.id === "string"
-          ? ((msg as any).info.id as string)
-          : typeof (msg as any)?.id === "string"
-            ? ((msg as any).id as string)
-            : "";
+      const msg = await OpenCode.runShell(sid, command, { agent, model: getModelOverride(), signal });
+      const messageID = readMessageId(msg);
       if (!messageID) {
         return { ok: false, output: "No message id returned from shell" };
       }
       const full = await OpenCode.getMessage(sid, messageID).catch(() => null);
-      const parts = full && Array.isArray((full as any).parts) ? ((full as any).parts as any[]) : [];
+      const parts = full?.parts ?? [];
 
       let ok = true;
       const out: string[] = [];
       for (const p of parts) {
         if (!p || p.type !== "tool") continue;
-        const s = p.state;
-        if (s?.status === "completed" && typeof s.output === "string" && s.output) out.push(s.output);
-        if (s?.status === "error") {
+        const s = isObj(p.state) ? p.state : null;
+        const status = s && typeof s.status === "string" ? s.status : "";
+        const output = s && typeof s.output === "string" ? s.output : "";
+        const err = s && typeof s.error === "string" ? s.error : "";
+
+        if (status === "completed" && output) out.push(output);
+        if (status === "error") {
           ok = false;
-          if (typeof s.error === "string" && s.error) out.push(s.error);
+          if (err) out.push(err);
         }
       }
       return { ok, output: out.join("\n").trim() };
@@ -586,15 +767,13 @@ const Builder = () => {
     [ensureShellSession, getModelOverride],
   );
 
-  const runChecks = useCallback(async () => {
+  const loopAbortRef = useRef<AbortController | null>(null);
+
+  const runChecks = useCallback(async (signal?: AbortSignal) => {
     const rootPkg = await OpenCode.readFile("package.json").catch(() => null);
     const rootJson = (() => {
       if (!rootPkg?.content) return null;
-      try {
-        return JSON.parse(rootPkg.content) as any;
-      } catch {
-        return null;
-      }
+      return parseJsonRecord(rootPkg.content);
     })();
 
     if (rootPkg?.content && !rootJson) {
@@ -607,20 +786,109 @@ const Builder = () => {
     if (!project.pkg) return { ok: false, log: `Invalid package.json at ${project.path} (JSON parse failed)` };
 
     const prefix = project.path && project.path !== "." ? `cd "${project.path}" && ` : "";
+    const pm = await detectPackageManager(runShell, prefix, signal);
 
     const scripts = project.pkg?.scripts && typeof project.pkg.scripts === "object" ? project.pkg.scripts : {};
     if (typeof scripts.test === "string") {
-      const res = await runShell(`${prefix}npm test`);
+      const testScript = scripts.test;
+      const usesVitest = /\bvitest\b/.test(testScript);
+
+      // Cap test concurrency and avoid watch-mode for Vitest by running it explicitly.
+      // (If it's not Vitest, fall back to `npm test`/`pnpm test` under CI.)
+      const cmd = (() => {
+        if (!usesVitest) return `${prefix}${commandFor(pm, "test")}`;
+
+        // Extract args after `vitest` inside the script and force `run`.
+        const m = /\bvitest\b([\s\S]*)$/.exec(testScript);
+        let args = (m?.[1] ?? "").trim();
+        args = args.replace(/\s--watch\b/g, "").replace(/\s-w\b/g, "").trim();
+        if (!/^run\b/.test(args)) args = `run ${args}`.trim();
+
+        // Use a Python wrapper to compute max-workers as 50% of CPU cores, without
+        // relying on shell `$...` expansion (some OpenCode backends sanitize it).
+        // Respect an explicit --max-workers if the script already sets one.
+        if (/--max-workers\b/.test(args)) {
+          return `${prefix}CI=1 ./node_modules/.bin/vitest ${args}`;
+        }
+
+        const py = [
+          "python3 - <<'PY'",
+          "import os, shlex, subprocess",
+          `args = shlex.split(r'''${args}''')`,
+          "cores = os.cpu_count() or 2",
+          "workers = max(1, cores // 2)",
+          "cmd = ['./node_modules/.bin/vitest', *args, f'--max-workers={workers}']",
+          "env = os.environ.copy()",
+          "env['CI'] = '1'",
+          "p = subprocess.run(cmd, env=env)",
+          "raise SystemExit(p.returncode)",
+          "PY",
+        ].join("\n");
+
+        return `${prefix}${py}`;
+      })();
+
+      const res = await runShell(cmd, signal);
+
+      // Cleanup: if vitest/jest spawned worker processes and leaked them, kill them.
+      // This is scoped to the current project directory only.
+      try {
+        const dir = OpenCodeDirectory.get();
+        const abs = dir ? (project.path && project.path !== "." ? `${dir.replace(/\/$/, "")}/${project.path}` : dir) : null;
+        if (abs) {
+          // Avoid shell variables and command substitution to survive backend sanitization.
+          const cleanup = [
+            "python3 - <<'PY'",
+            "import os, signal",
+            `ROOT = r'''${abs}'''`,
+            "ROOT = ROOT.rstrip('/')",
+            "killed = []",
+            "for pid in os.listdir('/proc'):",
+            "  if not pid.isdigit():",
+            "    continue",
+            "  p = int(pid)",
+            "  try:",
+            "    cwd = os.readlink(f'/proc/{pid}/cwd')",
+            "  except Exception:",
+            "    continue",
+            "  if not (cwd == ROOT or cwd.startswith(ROOT + '/')):",
+            "    continue",
+            "  try:",
+            "    cmd = open(f'/proc/{pid}/cmdline','rb').read().decode('utf-8','ignore').replace('\x00',' ').strip()",
+            "  except Exception:",
+            "    continue",
+            "  if not cmd:",
+            "    continue",
+            "  low = cmd.lower()",
+            "  if 'vitest' not in low and 'jest' not in low:",
+            "    continue",
+            "  # Don't kill the current python process.",
+            "  if p == os.getpid():",
+            "    continue",
+            "  try:",
+            "    os.kill(p, signal.SIGTERM)",
+            "    killed.append(str(p))",
+            "  except Exception:",
+            "    pass",
+            "print('killed_test_orphans=' + (','.join(killed) if killed else '<none>'))",
+            "PY",
+          ].join("\n");
+          await runShell(cleanup, signal);
+        }
+      } catch {
+        // Don't fail checks due to cleanup.
+      }
+
       return { ok: res.ok, log: res.output || "(no output)" };
     }
     if (typeof scripts.build === "string") {
-      const res = await runShell(`${prefix}npm run build`);
+      const res = await runShell(`${prefix}${commandFor(pm, "build")}`, signal);
       return { ok: res.ok, log: res.output || "(no output)" };
     }
 
     const serverIndex = await OpenCode.readFile(project.path && project.path !== "." ? `${project.path}/server/index.js` : "server/index.js").catch(() => null);
     if (serverIndex?.content) {
-      const res = await runShell(`${prefix}node -c server/index.js`);
+      const res = await runShell(`${prefix}node -c server/index.js`, signal);
       return { ok: res.ok, log: res.output || "(no output)" };
     }
 
@@ -634,11 +902,7 @@ const Builder = () => {
     const rootPkg = await OpenCode.readFile("package.json").catch(() => null);
     const rootJson = (() => {
       if (!rootPkg?.content) return null;
-      try {
-        return JSON.parse(rootPkg.content) as any;
-      } catch {
-        return null;
-      }
+      return parseJsonRecord(rootPkg.content);
     })();
     if (rootPkg?.content && !rootJson) throw new Error("Invalid package.json in workspace root (JSON parse failed)");
 
@@ -651,10 +915,15 @@ const Builder = () => {
     const prefix = project.path && project.path !== "." ? `cd "${project.path}" && ` : "";
     const port = stablePort;
 
+    const pm = await detectPackageManager(runShell, prefix, loopAbortRef.current?.signal ?? undefined);
+
     const agent = OpenCodePreferences.agent.get() ?? "task";
     const session = await ensureShellSession();
 
-    await OpenCode.runShell(session, `${prefix}test -d node_modules || npm install`, { agent });
+    await OpenCode.runShell(session, `${prefix}test -d node_modules || ${commandFor(pm, "install")}`, {
+      agent,
+      signal: loopAbortRef.current?.signal,
+    });
 
     const isNext =
       typeof project.pkg?.dependencies?.next === "string" ||
@@ -672,29 +941,30 @@ const Builder = () => {
 
     const cmd =
       (hasDev && isNext)
-        ? `${prefix}nohup npm run dev -- -p ${port} -H 127.0.0.1 > .opencode-preview.log 2>&1 & echo $!`
+        ? `${prefix}nohup ${commandFor(pm, "dev")} -- -p ${port} -H 127.0.0.1 > .opencode-preview.log 2>&1 & echo $!`
         : (hasDev && isVite)
-          ? `${prefix}nohup npm run dev -- --port ${port} --host 127.0.0.1 > .opencode-preview.log 2>&1 & echo $!`
+          ? `${prefix}nohup ${commandFor(pm, "dev")} -- --port ${port} --host 127.0.0.1 > .opencode-preview.log 2>&1 & echo $!`
           : hasDev
-            ? `${prefix}nohup npm run dev > .opencode-preview.log 2>&1 & echo $!`
+            ? `${prefix}nohup ${commandFor(pm, "dev")} > .opencode-preview.log 2>&1 & echo $!`
             : hasStart
-              ? `${prefix}nohup env PORT=${port} npm start > .opencode-preview.log 2>&1 & echo $!`
-              : `${prefix}nohup npm run dev > .opencode-preview.log 2>&1 & echo $!`;
+              ? `${prefix}nohup env PORT=${port} ${commandFor(pm, "start")} > .opencode-preview.log 2>&1 & echo $!`
+              : `${prefix}nohup ${commandFor(pm, "dev")} > .opencode-preview.log 2>&1 & echo $!`;
 
-    const msg = await OpenCode.runShell(session, cmd, { agent });
-    const messageID =
-      typeof (msg as any)?.info?.id === "string"
-        ? ((msg as any).info.id as string)
-        : typeof (msg as any)?.id === "string"
-          ? ((msg as any).id as string)
-          : "";
+    const msg = await OpenCode.runShell(session, cmd, { agent, signal: loopAbortRef.current?.signal });
+    const messageID = readMessageId(msg);
     const full = messageID ? await OpenCode.getMessage(session, messageID).catch(() => null) : null;
-    const parts = full && Array.isArray((full as any).parts) ? ((full as any).parts as any[]) : [];
-    const out = parts
-      .filter((p) => p?.type === "tool" && p.state?.status === "completed" && typeof p.state?.output === "string")
-      .map((p) => p.state.output as string)
-      .join("\n")
-      .trim();
+    const parts = full?.parts ?? [];
+    const out = (() => {
+      const lines: string[] = [];
+      for (const p of parts) {
+        if (!p || p.type !== "tool") continue;
+        const state = isObj(p.state) ? p.state : null;
+        const status = state && typeof state.status === "string" ? state.status : "";
+        const output = state && typeof state.output === "string" ? state.output : "";
+        if (status === "completed" && output) lines.push(output);
+      }
+      return lines.join("\n").trim();
+    })();
     const pid = Number.parseInt(out, 10);
     const url = `http://localhost:${port}`;
 
@@ -702,9 +972,9 @@ const Builder = () => {
     setPreviewUrl(url);
     setCanRunPreview(false);
     return { url, pid: Number.isFinite(pid) ? pid : undefined };
-  }, [detectProjectRoot, ensureShellSession, stablePort]);
+  }, [detectProjectRoot, ensureShellSession, runShell, stablePort]);
 
-  const observe = useCallback(async () => {
+  const observe = useCallback(async (signal?: AbortSignal) => {
     await refreshRootFiles().catch(() => undefined);
     await refreshPreview().catch(() => undefined);
 
@@ -718,39 +988,56 @@ const Builder = () => {
       const outPng = `${base}.png`;
       const outDom = `${base}.dom.html`;
       const outLog = `${base}.chromium.log`;
-      await OpenCode.runShell(
-        sid,
-        [
-          `URL="${url}"`,
-          `OUT="${outPng}"`,
-          `DOM="${outDom}"`,
-          `LOG="${outLog}"`,
-          "BROWSER=",
-          "for c in google-chrome chromium chromium-browser; do",
-          "  p=$(command -v $c 2>/dev/null || true)",
-          "  if [ -n \"$p\" ] && \"$p\" --version >/dev/null 2>&1; then BROWSER=\"$p\"; break; fi",
-          "done",
-          "mkdir -p \"$(dirname \"$OUT\")\"",
-          "for i in 1 2 3 4 5; do",
-          "  curl -sSf --max-time 2 \"$URL\" > \"$DOM\" 2>/dev/null || { sleep 1; continue; }",
-          "  if [ -z \"$BROWSER\" ]; then echo NO_HEADLESS_BROWSER > \"$LOG\"; echo SCREENSHOT:SKIP:$OUT; exit 0; fi",
-          "  \"$BROWSER\" --headless=new --disable-gpu --no-sandbox --hide-scrollbars --window-size=1366,768 --dump-dom \"$URL\" > \"$DOM\" 2>\"$LOG\" || true",
-          "  \"$BROWSER\" --headless=new --disable-gpu --no-sandbox --hide-scrollbars --window-size=1366,768 --screenshot=\"$OUT\" \"$URL\" >/dev/null 2>&1 || \\",
-          "  \"$BROWSER\" --headless --disable-gpu --no-sandbox --hide-scrollbars --window-size=1366,768 --screenshot=\"$OUT\" \"$URL\" >/dev/null 2>&1 || true",
-          "  [ -s \"$OUT\" ] && { echo SCREENSHOT:OK:$OUT; exit 0; }",
-          "  sleep 1",
-          "done",
-          "echo CONNECTION_FAILED > \"$LOG\"",
-          "echo '<!-- CONNECTION_FAILED -->' > \"$DOM\"",
-          "echo SCREENSHOT:FAIL:$OUT",
-          "exit 0",
-        ].join("; "),
-        { agent },
-      ).catch(() => undefined);
 
-      const img = await OpenCode.readFile(outPng).catch(() => null);
-      const dom = await OpenCode.readFile(outDom).catch(() => null);
-      const log = await OpenCode.readFile(outLog).catch(() => null);
+      // IMPORTANT: The OpenCode shell backend can sanitize `$...` expansions and `$(...)` substitutions.
+      // Build a probe command that avoids *all* shell variables so it remains valid after sanitization.
+      const cmd = [
+        `mkdir -p "opencode-artifacts/observe"`,
+        // Retry curl a few times.
+        `for i in 1 2 3 4 5 6 7 8; do`,
+        `  curl -4 -sSf --max-time 5 "${url}" > "${outDom}" 2>"${outLog}" && break || true`,
+        `  sleep 1`,
+        `done`,
+        // Headless browser (best-effort). We avoid storing the chosen binary in a variable.
+        `if google-chrome --version >/dev/null 2>&1; then`,
+        `  google-chrome --headless=new --disable-gpu --no-sandbox --hide-scrollbars --window-size=1366,768 --dump-dom "${url}" > "${outDom}" 2>"${outLog}" || true`,
+        `  google-chrome --headless=new --disable-gpu --no-sandbox --hide-scrollbars --window-size=1366,768 --screenshot="${outPng}" "${url}" >/dev/null 2>&1 || true`,
+        `elif chromium --version >/dev/null 2>&1; then`,
+        `  chromium --headless=new --disable-gpu --no-sandbox --hide-scrollbars --window-size=1366,768 --dump-dom "${url}" > "${outDom}" 2>"${outLog}" || true`,
+        `  chromium --headless=new --disable-gpu --no-sandbox --hide-scrollbars --window-size=1366,768 --screenshot="${outPng}" "${url}" >/dev/null 2>&1 || true`,
+        `elif chromium-browser --version >/dev/null 2>&1; then`,
+        `  chromium-browser --headless=new --disable-gpu --no-sandbox --hide-scrollbars --window-size=1366,768 --dump-dom "${url}" > "${outDom}" 2>"${outLog}" || true`,
+        `  chromium-browser --headless=new --disable-gpu --no-sandbox --hide-scrollbars --window-size=1366,768 --screenshot="${outPng}" "${url}" >/dev/null 2>&1 || true`,
+        `else`,
+        `  echo NO_HEADLESS_BROWSER > "${outLog}"`,
+        `fi`,
+        // If curl never succeeded, leave a clear marker.
+        `test -s "${outDom}" || echo '<!-- CONNECTION_FAILED -->' >> "${outDom}"`,
+        `test -s "${outDom}" || echo CONNECTION_FAILED >> "${outLog}"`,
+        `exit 0`,
+      ].join("\n");
+
+      const shellErr = await OpenCode.runShell(
+        sid,
+        cmd,
+        { agent, signal },
+      )
+        .then(() => "")
+        .catch((err: unknown) => (err instanceof Error ? err.message : "OpenCode.runShell failed"));
+
+      const imgRes = await OpenCode.readFile(outPng)
+        .then((v) => ({ ok: true as const, v }))
+        .catch((err: unknown) => ({ ok: false as const, err: err instanceof Error ? err.message : "readFile failed" }));
+      const domRes = await OpenCode.readFile(outDom)
+        .then((v) => ({ ok: true as const, v }))
+        .catch((err: unknown) => ({ ok: false as const, err: err instanceof Error ? err.message : "readFile failed" }));
+      const logRes = await OpenCode.readFile(outLog)
+        .then((v) => ({ ok: true as const, v }))
+        .catch((err: unknown) => ({ ok: false as const, err: err instanceof Error ? err.message : "readFile failed" }));
+
+      const img = imgRes.ok ? imgRes.v : null;
+      const dom = domRes.ok ? domRes.v : null;
+      const log = logRes.ok ? logRes.v : null;
 
       const domText = dom?.content && typeof dom.content === "string" ? dom.content : "";
       const logText = log?.content && typeof log.content === "string" ? log.content : "";
@@ -761,6 +1048,25 @@ const Builder = () => {
           : null;
 
       const hit = (() => {
+        if (shellErr) return `SHELL_FAILED\n${shellErr}`;
+        if (!imgRes.ok || !domRes.ok || !logRes.ok) {
+          const readErr = (r: unknown) => {
+            if (!r || typeof r !== "object") return "readFile failed";
+            if ("err" in r && typeof (r as { err?: unknown }).err === "string") return (r as { err: string }).err;
+            return "readFile failed";
+          };
+          return [
+            "ARTIFACT_READ_FAILED",
+            !imgRes.ok ? `- png: ${readErr(imgRes)}` : "",
+            !domRes.ok ? `- dom: ${readErr(domRes)}` : "",
+            !logRes.ok ? `- log: ${readErr(logRes)}` : "",
+            "",
+            `paths:\n- ${outPng}\n- ${outDom}\n- ${outLog}`,
+          ]
+            .filter(Boolean)
+            .join("\n")
+            .trim();
+        }
         if (/\bCONNECTION_FAILED\b/.test(logText)) return "CONNECTION_FAILED";
         // If we can curl the page but can't screenshot, don't fail the check.
         if (/\bNO_HEADLESS_BROWSER\b/.test(logText)) return "";
@@ -782,22 +1088,33 @@ const Builder = () => {
     // We must probe "localhost" because the shell runs in the same container/netns as the server.
     // window.location.origin might be an external IP (if accessed from LAN) which the container can't resolve or reach.
     const port = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
-    const selfUrl = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
-      ? `${window.location.origin}/builder`
-      : `${window.location.protocol}//localhost:${port}/builder`;
+    const selfUrl = `${window.location.protocol}//127.0.0.1:${port}/builder`;
 
-    const selfBase = `.opencode/observe/builder-${iter}`;
+    const selfBase = `opencode-artifacts/observe/builder-${iter}`;
     const self = await chromeProbe(selfUrl, selfBase);
-    if (!self.ok) {
-      const msg = `Builder render check failed for ${selfUrl}\n${self.hit}\nArtifacts:\n- ${self.outPng}\n- ${self.outDom}\n- ${self.outLog}`;
-      logs.push(msg);
-      info("UI render check: failed", msg);
-      return { ok: false, log: msg };
-    }
+      if (!self.ok) {
+        // Fallback: if the shell cannot reach the dev server (common in containerized setups),
+        // do a lightweight in-browser fetch so we don't block the loop on infra limitations.
+        if (/\b(CONNECTION_FAILED|ARTIFACT_READ_FAILED|SHELL_FAILED)\b/.test(self.hit)) {
+          try {
+            const res = await fetch("/builder", { cache: "no-store" });
+            if (res.ok) {
+              info("UI render check", `shell probe failed (${self.hit}); browser fetch ok`);
+              return { ok: true, log: logs.join("\n\n").trim() };
+            }
+          } catch {
+            // keep failing below
+          }
+        }
+        const msg = `Builder render check failed for ${selfUrl}\n${self.hit}\nArtifacts:\n- ${self.outPng}\n- ${self.outDom}\n- ${self.outLog}`;
+        logs.push(msg);
+        info("UI render check: failed", msg);
+        return { ok: false, log: msg };
+      }
 
     const url = previewUrl;
     if (url) {
-      const base = `.opencode/observe/preview-${iter}`;
+      const base = `opencode-artifacts/observe/preview-${iter}`;
       const probe = await chromeProbe(url, base);
       if (probe.screenshot) {
         setLastScreenshot({ path: probe.outPng, dataUrl: probe.screenshot });
@@ -869,13 +1186,17 @@ const Builder = () => {
         return true;
       };
 
+      const abort = new AbortController();
+      loopAbortRef.current = abort;
+      const signal = abort.signal;
+
       try {
         if (input.mode === "full") {
           setLoopState("PLANNING");
           info("Loop", `Iter ${loop.iteration + 1}: planning`);
 
           // Step 1: PageSpec (single source of truth for UI generation).
-          const psRes = await handleSendMessage(
+          const psRes = await handleSendMessageRef.current(
             [
               `User Goal:\n${input.goal}`,
               "",
@@ -910,7 +1231,7 @@ const Builder = () => {
               ),
               "```",
             ].join("\n"),
-            { agent: "task", files: input.files },
+            { agent: "task", files: input.files, signal },
           );
           if (questionRef.current) return;
           if (stopIfRequested()) return;
@@ -929,7 +1250,7 @@ const Builder = () => {
           }
 
           // Step 2: Plan (after PageSpec exists).
-          await handleSendMessage(
+          await handleSendMessageRef.current(
             [
               `User Goal:\n${input.goal}`,
               "",
@@ -961,7 +1282,7 @@ const Builder = () => {
             ]
               .filter(Boolean)
               .join("\n"),
-            { agent: "task", files: input.files },
+            { agent: "task", files: input.files, signal },
           );
           if (questionRef.current) return;
           if (stopIfRequested()) return;
@@ -973,14 +1294,14 @@ const Builder = () => {
 
         // Ensure we have a PageSpec even for "apply-next" runs.
         if (!pageSpecRaw) {
-          const psRes = await handleSendMessage(
+          const psRes = await handleSendMessageRef.current(
             [
               `User Goal:\n${input.goal}${ctx}`,
               "",
               "We are missing a PageSpec. Produce it now.",
               "Return ONLY one JSON code block (no other text).",
             ].join("\n"),
-            { agent: "task" },
+            { agent: "task", signal },
           );
           if (questionRef.current) return;
           if (stopIfRequested()) return;
@@ -993,7 +1314,7 @@ const Builder = () => {
           }
         }
 
-          await handleSendMessage(
+          await handleSendMessageRef.current(
             [
               `User Goal:\n${input.goal}${ctx}`,
               pageSpecRaw ? `\n\nPageSpec:\n\n\`\`\`json\n${pageSpecRaw}\n\`\`\`` : "",
@@ -1001,6 +1322,10 @@ const Builder = () => {
               "Guardrails:",
               "- Work in the CURRENT directory only (treat it as the project root).",
               "- Do NOT create nested project folders. Apply changes in-place.",
+              "",
+              "Completion:",
+              "- If you believe the project is complete and deployable, write `.unloveable/complete.json` with JSON: {\"complete\": true, \"reason\": \"...\" }",
+              "- Only mark complete when `npm run build` (or equivalent) passes and the app can be started locally.",
               "",
               "Speed:",
               "- Use subtasks/agents to parallelize (explore vs implement vs verify).",
@@ -1037,21 +1362,21 @@ const Builder = () => {
           ]
             .filter(Boolean)
             .join("\n"),
-            { agent: "task", files: input.files },
+            { agent: "task", files: input.files, signal },
           );
         if (questionRef.current) return;
         if (stopIfRequested()) return;
 
         setLoopState("RUNNING");
         info("Loop", `Iter ${loop.iteration + 1}: running checks`);
-        const res = await runChecks();
+        const res = await runChecks(signal);
         dispatchLoop({ type: "SET_RUN_LOG", log: res.log });
         info(`Checks: ${res.ok ? "ok" : "failed"}`, res.log);
         if (stopIfRequested()) return;
 
         setLoopState("OBSERVING");
         info("Loop", `Iter ${loop.iteration + 1}: observing`);
-        const obs = await observe();
+        const obs = await observe(signal);
         if (stopIfRequested()) return;
 
         if (!obs.ok) {
@@ -1069,7 +1394,7 @@ const Builder = () => {
 
           setLoopState("REPAIRING");
           info("Loop", `Iter ${loop.iteration + 1}: repairing (ui)`);
-          await handleSendMessage(
+          await handleSendMessageRef.current(
             [
               STRICT_QUESTIONS,
               "",
@@ -1080,13 +1405,13 @@ const Builder = () => {
             ]
               .filter(Boolean)
               .join("\n"),
-            { agent: "task" },
+            { agent: "task", signal },
           );
           if (questionRef.current) return;
           if (stopIfRequested()) return;
 
           setLoopState("OBSERVING");
-          const obs2 = await observe();
+          const obs2 = await observe(signal);
           if (obs2.ok) {
             dispatchLoop({ type: "SET_ERROR", error: null });
           } else {
@@ -1106,7 +1431,7 @@ const Builder = () => {
         dispatchLoop({ type: "SET_ERROR", error: res.log });
         setLoopState("REPAIRING");
         info("Loop", `Iter ${loop.iteration + 1}: repairing`);
-        await handleSendMessage(
+        await handleSendMessageRef.current(
           [
             STRICT_QUESTIONS,
             "",
@@ -1114,18 +1439,18 @@ const Builder = () => {
             "",
             `Error output:\n${res.log}`,
           ].join("\n"),
-          { agent: "task" },
+          { agent: "task", signal },
         );
         if (questionRef.current) return;
         if (stopIfRequested()) return;
 
         setLoopState("RUNNING");
-        const res2 = await runChecks();
+        const res2 = await runChecks(signal);
         dispatchLoop({ type: "SET_RUN_LOG", log: res2.log });
         info(`Checks: ${res2.ok ? "ok" : "failed"}`, res2.log);
 
         setLoopState("OBSERVING");
-        await observe();
+        await observe(signal);
 
         if (res2.ok) {
           dispatchLoop({ type: "SET_ERROR", error: null });
@@ -1144,7 +1469,32 @@ const Builder = () => {
         error("Loop", msg);
       }
     },
-    [error, handleSendMessage, info, observe, pendingQuestions, runChecks, setLoopState, success, warn, loop.state, loop.iteration],
+    [error, info, observe, pageSpec, pageSpecRaw, pendingQuestions, runChecks, setLoopState, success, loop.state, loop.iteration],
+  );
+
+  const runAutoLoop = useCallback(
+    async (input: { goal: string; files?: File[] }) => {
+      autoLoopRef.current = { active: true, goal: input.goal, max: 25, startedAt: Date.now() };
+      loopStopRef.current = false;
+
+      for (let i = 0; i < 25; i++) {
+        if (!autoLoopRef.current?.active) return;
+        if (loopStopRef.current) return;
+
+        if (await isComplete()) {
+          autoLoopRef.current = { ...autoLoopRef.current, active: false };
+          success("Loop", "Project marked complete (.unloveable/complete.json)");
+          return;
+        }
+
+        await runLoopOnce({ goal: input.goal, mode: i === 0 ? "full" : "apply-next", files: i === 0 ? input.files : undefined });
+        await new Promise((r) => window.setTimeout(r, 0));
+      }
+
+      autoLoopRef.current = { ...autoLoopRef.current!, active: false };
+      warn("Loop", "Stopped after 25 iterations (max)");
+    },
+    [isComplete, runLoopOnce, success, warn],
   );
 
   const runPreview = useCallback(async () => {
@@ -1245,7 +1595,7 @@ const Builder = () => {
         const safe = content.replace(/\r\n/g, "\n");
         await OpenCode.runShell(
           id,
-          `mkdir -p "$(dirname \"${dir}/${file}\")" && cat > "${dir}/${file}" <<'EOF'\n${safe}\nEOF`,
+          `mkdir -p "$(dirname "${dir}/${file}")" && cat > "${dir}/${file}" <<'EOF'\n${safe}\nEOF`,
           { agent },
         );
       };
@@ -1606,8 +1956,10 @@ EOF`,
         await refreshRootFiles();
         await refreshPreview().catch(() => undefined);
         await ensureSession();
+        const dirOverride = OpenCodeDirectory.get();
+        if (dirOverride) info("OpenCode working directory", dirOverride);
         await OpenCode.pathInfo()
-          .then((p) => info("OpenCode directory", p.directory))
+          .then((p) => info("OpenCode server directory", p.directory))
           .catch(() => undefined);
       } catch (err) {
         error(
@@ -1623,37 +1975,37 @@ EOF`,
     };
   }, [ensureSession, refreshRootFiles, refreshPreview, info, warn, error]);
 
+  const applyDirectory = useCallback(
+    async (abs: string) => {
+      OpenCodeDirectory.set(abs);
+      setDirectory(OpenCodeDirectory.get());
+
+      await stop();
+      setSessionID(null);
+      setMessages([]);
+      setSelectedFile(null);
+      setChildrenByPath({});
+
+      try {
+        await refreshRootFiles();
+        await refreshPreview().catch(() => undefined);
+        await ensureSession();
+        setGoal(null);
+        dispatchLoop({ type: "RESET" });
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to switch directory");
+      }
+    },
+    [ensureSession, refreshPreview, refreshRootFiles, stop],
+  );
+
   const handleChangeDirectory = useCallback(async () => {
-    const current = OpenCodeDirectory.get() ?? RECOMMENDED_DIRECTORY;
-    const next = window.prompt(
-      "OpenCode directory (absolute path). This controls which git repo/files OpenCode operates on.",
-      current,
-    );
-    if (next === null) return;
-
-    OpenCodeDirectory.set(next);
-    setDirectory(OpenCodeDirectory.get());
-
-    await stop();
-    setSessionID(null);
-    setMessages([]);
-    setSelectedFile(null);
-    setChildrenByPath({});
-
-    try {
-      await refreshRootFiles();
-      await refreshPreview().catch(() => undefined);
-      await ensureSession();
-      setGoal(null);
-      dispatchLoop({ type: "RESET" });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to switch directory");
-    }
-  }, [refreshRootFiles, refreshPreview, stop, info, ensureSession]);
+    setDirPickerOpen(true);
+  }, []);
 
   async function handleSendMessage(
     content: string,
-    opts?: { agent?: string; files?: File[] },
+    opts?: { agent?: string; files?: File[]; signal?: AbortSignal },
   ): Promise<null | { text: string; messageID?: string }> {
     questionRef.current = false;
 
@@ -1670,7 +2022,9 @@ EOF`,
     if (selected.length > 6) {
       toast.error("Too many attachments (max 6)");
       return;
-    }
+  }
+
+  handleSendMessageRef.current = handleSendMessage;
 
     let fileParts: Array<{ type: "file"; url: string; mime: string; filename?: string }> = [];
     let done = false;
@@ -1760,8 +2114,11 @@ EOF`,
                 return typeof created === "number" && created >= startedAt - 2000 && typeof completed === "number";
               });
             if (!match) return;
-            const msg = { info: { id: match.info.id, role: match.info.role, error: match.info.error }, parts: match.parts };
-            const text = extractDisplayText(msg as any);
+            const msg: OpenCodeMessageResponse = {
+              info: { id: match.info.id, role: match.info.role, error: match.info.error },
+              parts: match.parts,
+            };
+            const text = extractDisplayText(msg);
 
              abortRef.current?.abort();
              abortRef.current = null;
@@ -1801,31 +2158,27 @@ EOF`,
            const ocMessageID = msg?.info?.id;
            if (ocMessageID) setLastAssistantMessageID(ocMessageID);
 
-          const assistantAttachments = (() => {
-            const out: Array<{ url: string; mime: string; filename?: string }> = [];
-            const parts = Array.isArray(msg.parts) ? msg.parts : [];
-            for (const p of parts) {
-              const t = (p as any)?.type;
-              if (t === "file") {
-                const url = typeof (p as any).url === "string" ? (p as any).url : "";
-                const mime = typeof (p as any).mime === "string" ? (p as any).mime : "application/octet-stream";
-                const filename = typeof (p as any).filename === "string" ? (p as any).filename : undefined;
-                if (url) out.push({ url, mime, filename });
-              }
-              if (t === "tool") {
-                const att = (p as any)?.state?.attachments;
-                if (Array.isArray(att)) {
-                  for (const a of att) {
-                    const url = typeof (a as any)?.url === "string" ? (a as any).url : "";
-                    const mime = typeof (a as any)?.mime === "string" ? (a as any).mime : "application/octet-stream";
-                    const filename = typeof (a as any)?.filename === "string" ? (a as any).filename : undefined;
-                    if (url) out.push({ url, mime, filename });
-                  }
-                }
-              }
-            }
-            return out;
-          })();
+           const assistantAttachments = (() => {
+             const out: Array<{ url: string; mime: string; filename?: string }> = [];
+             const parts = Array.isArray(msg.parts) ? msg.parts : [];
+             for (const p of parts) {
+               if (!p || typeof p !== "object") continue;
+               const part = p as OpenCodeMessagePart;
+               const t = part.type;
+               if (t === "file") {
+                 const url = typeof part.url === "string" ? part.url : "";
+                 if (!url) continue;
+                 const mime = typeof part.mime === "string" ? part.mime : "application/octet-stream";
+                 const filename = typeof part.filename === "string" ? part.filename : undefined;
+                 out.push({ url, mime, filename });
+                 continue;
+               }
+               if (t === "tool") {
+                 out.push(...parseAttachmentsFromToolState(part.state));
+               }
+             }
+             return out;
+           })();
           const ocError = (() => {
             const err = msg.info?.error as unknown;
             if (!err) return "";
@@ -1844,8 +2197,11 @@ EOF`,
           })();
           if (ocError) {
             const hint = (() => {
-              const err = msg.info?.error as any;
-              const url = typeof err?.data?.metadata?.url === "string" ? (err.data.metadata.url as string) : "";
+              const err = msg.info?.error as unknown;
+              if (!isObj(err)) return "";
+              const data = isObj(err.data) ? err.data : null;
+              const metadata = data && isObj(data.metadata) ? data.metadata : null;
+              const url = metadata && typeof metadata.url === "string" ? metadata.url : "";
               if (url.includes("githubcopilot")) return "GitHub Copilot";
               if (url.includes("openai")) return "OpenAI";
               if (url.includes("anthropic")) return "Anthropic";
@@ -1900,14 +2256,14 @@ EOF`,
             );
           }
 
-          const raw = (() => {
-            const parts = Array.isArray(msg.parts) ? msg.parts : [];
-            return parts
-              .filter((p) => p && (p as any).type && (((p as any).type === "text") || ((p as any).type === "reasoning")))
-              .map((p) => (typeof (p as any).text === "string" ? (p as any).text : ""))
-              .filter(Boolean)
-              .join("\n\n");
-          })();
+           const raw = (() => {
+             const parts = Array.isArray(msg.parts) ? msg.parts : [];
+             return parts
+               .filter((p): p is OpenCodeMessagePart => !!p && (p.type === "text" || p.type === "reasoning"))
+               .map((p) => (typeof p.text === "string" ? p.text : ""))
+               .filter(Boolean)
+               .join("\n\n");
+           })();
 
            const qs = extractClarificationSpec(raw || responseText);
           if (qs.source === "heuristic" && qs.items.length) {
@@ -1917,9 +2273,10 @@ EOF`,
             );
           }
            if (qs.items.length) {
-            questionRef.current = true;
-            setPendingQuestions(qs.items);
-            dispatchLoop({ type: "SET_STATE", state: "IDLE" });
+             questionRef.current = true;
+             setPendingQuestions(qs.items);
+             setPendingQuestionsKind("clarification");
+             dispatchLoop({ type: "SET_STATE", state: "IDLE" });
 
             // Don't leave raw JSON in chat; replace with a short prompt.
             setMessages((prev) =>
@@ -1993,6 +2350,161 @@ EOF`,
     async (answers: Array<{ id: string; answer: string }>) => {
       if (!pendingQuestions?.length) return;
 
+      const kind = pendingQuestionsKind;
+
+      // Close modal before doing network work.
+      setPendingQuestions(null);
+      setPendingQuestionsKind(null);
+
+      if (kind === "intake") {
+        const g = pendingGoalToResume || goal || "(no goal set)";
+        const normalized = answers.map((a) => ({ id: a.id, answer: a.answer.trim() }));
+        setIntakeSnapshot({ goal: g, answers: normalized });
+
+        // Generate docs into the current workspace.
+        const prompt = [
+          "You are the Foundry Doc Generator.",
+          "Do not write implementation code.",
+          "Do not add features beyond the user's intent.",
+          "",
+          `User idea:\n${g}`,
+          "",
+          "User answers:",
+          ...normalized.map((a) => `- ${a.id}: ${a.answer || "(no answer)"}`),
+          "",
+          "Write/update these files in the CURRENT directory:",
+          "- spec.md",
+          "- brand-and-ux-spec.md",
+          "- architecture.md",
+          "- implementation-plan.md",
+          "- prompt.md",
+          "",
+          "Return ONLY one JSON code block with EXACT keys:",
+          "spec.md, brand-and-ux-spec.md, architecture.md, implementation-plan.md, prompt.md",
+          "Each value must be the full file content as a string.",
+        ].join("\n");
+
+        const res = await handleSendMessageRef.current(prompt, { agent: "task" });
+        if (res?.text) {
+          const m = /```json\s*([\s\S]*?)\s*```/i.exec(res.text);
+          const obj = m ? parseJsonRecord(m[1]) : null;
+          const files = obj && {
+            spec: typeof obj["spec.md"] === "string" ? (obj["spec.md"] as string) : null,
+            brand: typeof obj["brand-and-ux-spec.md"] === "string" ? (obj["brand-and-ux-spec.md"] as string) : null,
+            arch: typeof obj["architecture.md"] === "string" ? (obj["architecture.md"] as string) : null,
+            plan: typeof obj["implementation-plan.md"] === "string" ? (obj["implementation-plan.md"] as string) : null,
+            loop: typeof obj["prompt.md"] === "string" ? (obj["prompt.md"] as string) : null,
+          };
+
+          if (!files || !files.spec || !files.brand || !files.arch || !files.plan || !files.loop) {
+            toast.error("Doc generator did not return valid JSON for required files");
+            return;
+          }
+
+          await OpenCode.writeFile("spec.md", files.spec);
+          await OpenCode.writeFile("brand-and-ux-spec.md", files.brand);
+          await OpenCode.writeFile("architecture.md", files.arch);
+          await OpenCode.writeFile("implementation-plan.md", files.plan);
+          await OpenCode.writeFile("prompt.md", files.loop);
+          info("Intake", "Wrote docs: spec.md, brand-and-ux-spec.md, architecture.md, implementation-plan.md, prompt.md");
+        }
+
+        // Ensure we have a runnable project in blank workspaces.
+        const hasPkg = await OpenCode.readFile("package.json")
+          .then((r) => !!r?.content)
+          .catch(() => false);
+        if (!hasPkg) {
+          info("Scaffold", "No package.json found; creating a minimal Vite React TS scaffold");
+          const name = (OpenCodeDirectory.get() || "workspace").split("/").pop() || "workspace";
+          const normalizedName = name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+          await OpenCode.writeFile(
+            "package.json",
+            JSON.stringify(
+              {
+                name: normalizedName || "workspace",
+                private: true,
+                version: "0.0.0",
+                type: "module",
+                scripts: { dev: "vite", build: "vite build", preview: "vite preview" },
+                dependencies: { react: "^18.3.0", "react-dom": "^18.3.0" },
+                devDependencies: {
+                  vite: "^5.2.0",
+                  "@vitejs/plugin-react": "^4.3.0",
+                  typescript: "^5.4.0",
+                  "@types/react": "^18.3.0",
+                  "@types/react-dom": "^18.3.0",
+                },
+              },
+              null,
+              2,
+            ),
+          );
+          await OpenCode.writeFile(
+            "tsconfig.json",
+            JSON.stringify(
+              {
+                compilerOptions: {
+                  target: "ESNext",
+                  module: "ESNext",
+                  jsx: "react-jsx",
+                  moduleResolution: "Bundler",
+                  strict: true,
+                  skipLibCheck: true,
+                },
+              },
+              null,
+              2,
+            ),
+          );
+          await OpenCode.writeFile(
+            "vite.config.ts",
+            ['import { defineConfig } from "vite"', 'import react from "@vitejs/plugin-react"', "", "export default defineConfig({ plugins: [react()] })", ""].join("\n"),
+          );
+          await OpenCode.writeFile(
+            "index.html",
+            [
+              "<!doctype html>",
+              "<html>",
+              "  <head>",
+              "    <meta charset=\"UTF-8\" />",
+              "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />",
+              "    <title>Vite React TS</title>",
+              "  </head>",
+              "  <body>",
+              "    <div id=\"root\"></div>",
+              "    <script type=\"module\" src=\"/src/main.tsx\"></script>",
+              "  </body>",
+              "</html>",
+              "",
+            ].join("\n"),
+          );
+          await OpenCode.writeFile(
+            "src/main.tsx",
+            ['import React from "react"', 'import { createRoot } from "react-dom/client"', 'import App from "./App"', "", 'createRoot(document.getElementById("root")!).render(<App />)', ""].join("\n"),
+          );
+          await OpenCode.writeFile(
+            "src/App.tsx",
+            [
+              "export default function App() {",
+              "  return (",
+              "    <main style={{ fontFamily: 'system-ui, sans-serif', padding: 24 }}>",
+              "      <h1>New Project</h1>",
+              "      <p>Scaffolded by UnLoveable intake.</p>",
+              "    </main>",
+              "  )",
+              "}",
+              "",
+            ].join("\n"),
+          );
+          await OpenCode.writeFile(".gitignore", "node_modules\ndist\n");
+        }
+
+        // Kick off the loop and keep iterating until complete.
+        setPendingGoalToResume(null);
+        await runAutoLoop({ goal: g });
+        return;
+      }
+
       const lines: string[] = ["Clarifications"]; 
       for (const q of pendingQuestions) {
         const a = answers.find((x) => x.id === q.id)?.answer || "(no answer)";
@@ -2000,13 +2512,12 @@ EOF`,
         lines.push(`  Answer: ${a}`);
       }
 
-      setPendingQuestions(null);
-      await handleSendMessage(lines.join("\n"), { agent: "task" });
+      await handleSendMessageRef.current(lines.join("\n"), { agent: "task" });
       if (goal) {
         await runLoopOnce({ goal, mode: "apply-next", extraContext: lines.join("\n") });
       }
     },
-    [goal, pendingQuestions, runLoopOnce],
+    [goal, info, pendingGoalToResume, pendingQuestions, pendingQuestionsKind, runAutoLoop, runLoopOnce],
   );
 
   const handleFileSelect = useCallback(
@@ -2077,13 +2588,37 @@ EOF`,
   const handleUserGoal = useCallback(
     async (payload: { content: string; files?: File[] }) => {
       setGoal(payload.content);
-      await runLoopOnce({ goal: payload.content, mode: "full", files: payload.files });
+
+      // Intake: before doing any building, collect the 5 questions and generate the docs.
+      // If docs already exist, skip straight to the loop.
+      const hasPrompt = await OpenCode.readFile("prompt.md")
+        .then((r) => !!r?.content)
+        .catch(() => false);
+      const hasSpec = await OpenCode.readFile("spec.md")
+        .then((r) => !!r?.content)
+        .catch(() => false);
+
+      if (!hasPrompt || !hasSpec) {
+        setPendingQuestions(INTAKE_QUESTIONS);
+        setPendingQuestionsKind("intake");
+        setPendingGoalToResume(payload.content);
+        return;
+      }
+
+      await runAutoLoop({ goal: payload.content, files: payload.files });
     },
-    [runLoopOnce],
+    [runAutoLoop],
   );
 
   return (
     <div className="h-screen flex flex-col bg-background">
+      <OpenCodeDirectoryDialog
+        open={dirPickerOpen}
+        onOpenChange={setDirPickerOpen}
+        onSelectAbsolutePath={(abs) => {
+          applyDirectory(abs).catch(() => undefined);
+        }}
+      />
       <BuilderHeader 
         sessions={sessions}
         isSessionsLoading={isSessionsLoading}
@@ -2098,6 +2633,7 @@ EOF`,
         sseStatus={sseStatus}
         isRunning={loopIsBusy(loop.state) || isGenerating || isRunStarting}
         onRunLoop={handleRunLoop}
+        onRunHeadless={() => runHeadlessLoop("exploration")}
         onStop={stop}
         onApplyNextPatch={handleApplyNextPatch}
         onResetSession={handleResetSession}

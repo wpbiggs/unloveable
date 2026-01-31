@@ -1,0 +1,13 @@
+{
+  "components": [
+    {
+      "id": "button",
+      "name": "Button",
+      "description": "Interactive button component",
+      "category": "ui",
+      "source": "shadcn",
+      "path": "@/components/ui/button",
+      "dependencies": []
+    }
+  ]
+}

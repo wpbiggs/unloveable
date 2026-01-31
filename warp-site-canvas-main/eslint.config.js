@@ -32,4 +32,16 @@ export default tseslint.config(
       "local-rules/no-direct-aceternity-imports": "error",
     },
   },
+  {
+    files: ["src/components/ui/**/*.{ts,tsx}"],
+    rules: {
+      "react-refresh/only-export-components": "off",
+    },
+  },
+  {
+    files: ["src/eslint-rules-tests/**/*.{ts,tsx}"],
+    rules: {
+      "local-rules/no-direct-aceternity-imports": "off",
+    },
+  },
 );

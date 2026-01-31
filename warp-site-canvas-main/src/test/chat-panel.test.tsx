@@ -3,6 +3,7 @@ import { render, screen } from "@testing-library/react";
 import ChatPanel from "../components/builder/ChatPanel";
 import { describe, it, expect, vi } from "vitest";
 import '@testing-library/jest-dom';
+import { Message } from "../lib/ai-config"; // Import Message type
 
 // Mock scrollIntoView
 window.HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -10,8 +11,14 @@ window.HTMLElement.prototype.scrollIntoView = vi.fn();
 describe("ChatPanel Loading State", () => {
   const defaultProps = {
     messages: [
-      { id: "1", role: "assistant", content: "Thinking...", attachments: [] }
-    ],
+      { 
+        id: "1", 
+        role: "assistant", 
+        content: "Thinking...", 
+        attachments: [], 
+        timestamp: new Date() // Add required timestamp
+      }
+    ] as Message[], // Cast to Message array
     onSendMessage: vi.fn(),
     isGenerating: true,
     activity: {
@@ -28,9 +35,9 @@ describe("ChatPanel Loading State", () => {
     const props = {
       ...defaultProps,
       messages: [
-        { id: "1", role: "user", content: "hi" },
-        { id: "2", role: "assistant", content: "" } // Empty content triggers loading state UI when isGenerating is true
-      ],
+        { id: "1", role: "user", content: "hi", timestamp: new Date() },
+        { id: "2", role: "assistant", content: "", timestamp: new Date() } // Empty content triggers loading state UI when isGenerating is true
+      ] as Message[],
       isGenerating: true
     };
     
@@ -51,9 +58,9 @@ describe("ChatPanel Loading State", () => {
      const props = {
       ...defaultProps,
       messages: [
-        { id: "1", role: "user", content: "hi" },
-        { id: "2", role: "assistant", content: "" }
-      ],
+        { id: "1", role: "user", content: "hi", timestamp: new Date() },
+        { id: "2", role: "assistant", content: "", timestamp: new Date() }
+      ] as Message[],
       isGenerating: true
     };
 

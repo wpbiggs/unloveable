@@ -160,9 +160,27 @@ function setDirectoryOverride(dir: string | null) {
       window.localStorage.removeItem(DIRECTORY_STORAGE_KEY);
       return;
     }
-    window.localStorage.setItem(DIRECTORY_STORAGE_KEY, dir.trim());
-  } catch {
-    // ignore
+    const cleanDir = dir.trim();
+
+    // Safety checks
+    const forbidden = [
+      /^\/$/, // Unix root
+      /^[a-zA-Z]:\\$/, // Windows root drive (C:\)
+      /^[a-zA-Z]:\/$/, // Windows root drive (C:/)
+      /^\/(etc|var|bin|usr|sbin|sys|proc|dev|root|boot|lib|lib64|opt|srv|tmp|run)(\/|$)/, // System dirs
+      /\.\./, // Parent directory traversal
+    ];
+
+    if (forbidden.some(regex => regex.test(cleanDir))) {
+      throw new Error("Path is not allowed");
+    }
+
+    window.localStorage.setItem(DIRECTORY_STORAGE_KEY, cleanDir);
+  } catch (err) {
+    if (err instanceof Error && err.message === "Path is not allowed") {
+        throw err;
+    }
+    // ignore storage errors
   }
 }
 
@@ -197,6 +215,7 @@ async function requestJson<T>(pathname: string, init?: RequestInit, query?: Reco
       "Content-Type": "application/json",
       ...(init?.headers ?? {}),
     },
+    signal: init?.signal,
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -212,6 +231,7 @@ async function requestRaw(pathname: string, init?: RequestInit, query?: Record<s
       "Content-Type": "application/json",
       ...(init?.headers ?? {}),
     },
+    signal: init?.signal,
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -233,8 +253,8 @@ export const OpenCode = {
     return requestJson<OpenCodeSession>("/session", { method: "POST", body: JSON.stringify({}) });
   },
 
-  async listSessions(query?: { roots?: boolean; start?: number; search?: string; limit?: number }) {
-    return requestJson<OpenCodeSession[]>("/session", undefined, {
+  async listSessions(query?: { roots?: boolean; start?: number; search?: string; limit?: number }, signal?: AbortSignal) {
+    return requestJson<OpenCodeSession[]>("/session", { signal }, {
       roots: query?.roots === undefined ? undefined : String(query.roots),
       start: query?.start === undefined ? undefined : String(query.start),
       search: query?.search,
@@ -271,7 +291,7 @@ export const OpenCode = {
     });
   },
 
-  async runShell(sessionID: string, command: string, input?: { agent?: string; model?: OpenCodePromptModel }) {
+  async runShell(sessionID: string, command: string, input?: { agent?: string; model?: OpenCodePromptModel; signal?: AbortSignal }) {
     const body = {
       agent: input?.agent ?? "task",
       model: input?.model,
@@ -280,14 +300,18 @@ export const OpenCode = {
 
     const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const max = 10;
+    const signal = input?.signal;
 
     for (let i = 0; i < max; i++) {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       try {
         return await requestJson<Json>(`/session/${encodeURIComponent(sessionID)}/shell`, {
           method: "POST",
           body: JSON.stringify(body),
+          signal,
         });
       } catch (err) {
+        if (signal?.aborted || (err instanceof DOMException && err.name === "AbortError")) throw err;
         const msg = err instanceof Error ? err.message : "";
         if (!/is busy/i.test(msg) || i === max - 1) throw err;
         await wait(200 + i * 150);
@@ -298,6 +322,7 @@ export const OpenCode = {
     return requestJson<Json>(`/session/${encodeURIComponent(sessionID)}/shell`, {
       method: "POST",
       body: JSON.stringify(body),
+      signal,
     });
   },
 

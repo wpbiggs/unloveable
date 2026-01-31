@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "category": { "type": "string", "enum": ["ui", "pattern", "brand"] },
+          "source": { "type": "string" },
+          "path": { "type": "string" },
+          "dependencies": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["id", "name", "description", "category", "source", "path"]
+      }
+    }
+  },
+  "required": ["components"]
+}
