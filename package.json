@@ -1,0 +1,48 @@
+{
+  "name": "opencode-test",
+  "version": "1.0.0",
+  "description": "This pack implements the **static-context Ralph Wiggum loop**: - source of truth in `spec.md` + `implementation-plan.md` - fresh context per iteration - test-driven work per task - headless loop runner via `run-loop.sh`",
+  "main": "extract-runlog.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wpbiggs/unloveable.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/wpbiggs/unloveable/issues"
+  },
+  "homepage": "https://github.com/wpbiggs/unloveable#readme",
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/file-saver": "^2.0.7",
+    "@types/node": "^25.1.0",
+    "@types/react-dom": "^19.2.3",
+    "@types/react-router-dom": "^5.3.3",
+    "file-saver": "^2.0.5",
+    "gh-pages": "^6.3.0",
+    "happy-dom": "^20.4.0",
+    "js-yaml": "^4.1.1",
+    "jsdom": "^27.4.0",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vite-tsconfig-paths": "^6.0.5",
+    "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "react-hotkeys-hook": "^5.2.3",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  }
+}

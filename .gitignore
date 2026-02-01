@@ -49,3 +49,11 @@ prompt.md
 
 # Local workspaces
 workspaces/
+
+# UnLoveable / loop artifacts
+runlogs/
+loop-docs/runlogs/
+test/tmp_test_run_loop/
+warp-site-canvas-main/playwright-report/
+warp-site-canvas-main/test-results/
+opencode/packages/opencode/runlogs/

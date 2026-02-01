@@ -1,0 +1,36 @@
+{
+  "protocolVersion": "2.0.0",
+  "name": "ralph-wiggum-static-context",
+  "freshContextRequired": true,
+  "sourceOfTruthFiles": [
+    "spec.md",
+    "implementation-plan.md",
+    "prompt.md"
+  ],
+  "states": [
+    "INSPECT",
+    "PLAN",
+    "PATCH",
+    "RUN",
+    "OBSERVE",
+    "REPAIR",
+    "DONE",
+    "STOPPED",
+    "ERROR"
+  ],
+  "requiredSections": [
+    "INSPECT",
+    "PLAN",
+    "ACTIONS",
+    "RESULTS",
+    "NEXT"
+  ],
+  "taskSelectionRule": "Pick the highest-leverage unchecked task from implementation-plan.md.",
+  "testDrivenRule": "Write/extend tests before implementation; only check off task if tests + validations pass.",
+  "stopConditions": [
+    "human_stop",
+    "all_tasks_checked",
+    "max_iterations",
+    "failure_threshold"
+  ]
+}

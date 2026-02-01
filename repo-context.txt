@@ -1,0 +1,4 @@
+prompt.md
+spec.md
+implementation-plan.md
+run-loop.sh
